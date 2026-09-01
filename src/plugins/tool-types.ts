@@ -18,6 +18,13 @@ export type OpenClawPluginToolDelivery = {
   send: (params: { text?: string; mediaUrl?: string }) => Promise<void>;
 };
 
+export type OpenClawPluginToolInvocationContext = {
+  /** Host run correlation. This is diagnostic/idempotency input, never authority. */
+  runId?: string;
+  /** Exact tool-call correlation within the host run. */
+  toolCallId: string;
+};
+
 /** Trusted execution context passed to plugin-owned agent tool factories. */
 export type OpenClawPluginToolContext = {
   config?: OpenClawConfig;
@@ -33,6 +40,8 @@ export type OpenClawPluginToolContext = {
   sessionKey?: string;
   /** Ephemeral session UUID - regenerated on /new and /reset. Use for per-conversation isolation. */
   sessionId?: string;
+  /** Returns the active execution identity only while this tool's execute call is running. */
+  getInvocationContext?: () => OpenClawPluginToolInvocationContext | undefined;
   /** Out-of-band plugin-owned bindings attached by the current run initiator. */
   toolBindings?: Readonly<Record<string, unknown>>;
   /** Host-prepared repository identities for project-aware tool behavior. */

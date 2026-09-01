@@ -1,10 +1,12 @@
 // Covers task-flow registry store persistence, events, and state queries.
 import { statSync } from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdmittedRunContext } from "../agents/admitted-run-context.js";
 import { createExecutionIdentityAdmissionToken } from "../audit/execution-identity-admission.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import { ensureManagedFlowStartClaimSchema } from "../state/openclaw-state-db-schema-additive.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
@@ -14,7 +16,9 @@ import {
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import {
+  claimManagedTaskFlowStart,
   createManagedTaskFlow as createManagedTaskFlowOrNull,
+  deleteTaskFlowRecordById,
   getTaskFlowById,
   requestFlowCancel,
   resumeFlow,
@@ -69,6 +73,22 @@ function createStoredFlow(): TaskFlowRecord {
     updatedAt: 120,
     endedAt: 120,
   };
+}
+
+function claimManagedStart(
+  overrides: Partial<Parameters<typeof claimManagedTaskFlowStart>[0]> = {},
+) {
+  return claimManagedTaskFlowStart({
+    ownerKey: "agent:main:main",
+    controllerId: "tests/exact-start",
+    runId: "run-1",
+    toolCallId: "call-1",
+    goal: "Start exactly once",
+    currentStep: "run_lobster",
+    runnerLease: { ownerId: "lobster", leaseId: "lease-1" },
+    requestJson: { pipeline: "noop", cwd: "." },
+    ...overrides,
+  });
 }
 
 async function withFlowRegistryTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
@@ -325,6 +345,133 @@ describe("task-flow-registry store runtime", () => {
         { name: "runner_owner_id", type: "TEXT", notnull: 0, dflt_value: null },
         { name: "runner_lease_id", type: "TEXT", notnull: 0, dflt_value: null },
       ]);
+    });
+  });
+
+  it("replays one managed start from sqlite after restart", async () => {
+    await withFlowRegistryTempDir(async () => {
+      const first = claimManagedStart();
+      expect(first.claimed).toBe(true);
+      if (!first.claimed) {
+        throw new Error("Expected the first managed start to persist");
+      }
+      expect(first).toMatchObject({
+        created: true,
+        flow: {
+          revision: 0,
+          status: "running",
+          runnerOwnerId: "lobster",
+          runnerLeaseId: "lease-1",
+        },
+      });
+
+      resetTaskFlowRegistryForTests({ persist: false });
+      const replay = claimManagedStart({
+        runnerLease: { ownerId: "lobster", leaseId: "lease-after-restart" },
+      });
+      expect(replay.claimed).toBe(true);
+      if (!replay.claimed) {
+        throw new Error("Expected the managed start replay to resolve");
+      }
+      expect(replay.created).toBe(false);
+      expect(replay.flow.flowId).toBe(first.flow.flowId);
+      expect(replay.flow.runnerLeaseId).toBe("lease-1");
+
+      const db = openOpenClawStateDatabase().db;
+      expect(db.prepare("SELECT COUNT(*) AS count FROM flow_runs").get()).toEqual({ count: 1 });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM managed_flow_start_claims").get()).toEqual({
+        count: 1,
+      });
+    });
+  });
+
+  it("rejects a changed request for the same managed start", async () => {
+    await withFlowRegistryTempDir(async () => {
+      const first = claimManagedStart();
+      expect(first.claimed).toBe(true);
+      const conflict = claimManagedStart({ requestJson: { pipeline: "changed", cwd: "." } });
+      expect(conflict).toMatchObject({
+        claimed: false,
+        reason: "request_conflict",
+        current: { flowId: first.claimed ? first.flow.flowId : "missing" },
+      });
+      expect(
+        openOpenClawStateDatabase().db.prepare("SELECT COUNT(*) AS count FROM flow_runs").get(),
+      ).toEqual({
+        count: 1,
+      });
+    });
+  });
+
+  it("rolls back the flow when the durable start claim cannot commit", async () => {
+    await withFlowRegistryTempDir(async () => {
+      const db = openOpenClawStateDatabase().db;
+      ensureManagedFlowStartClaimSchema(db);
+      db.exec(`
+        CREATE TRIGGER reject_managed_flow_start_claim
+        BEFORE INSERT ON managed_flow_start_claims
+        BEGIN
+          SELECT RAISE(ABORT, 'claim rejected');
+        END
+      `);
+
+      expect(claimManagedStart()).toEqual({ claimed: false, reason: "persist_failed" });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM flow_runs").get()).toEqual({ count: 0 });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM managed_flow_start_claims").get()).toEqual({
+        count: 0,
+      });
+    });
+  });
+
+  it("keeps the same schema version and remains usable by the previous table shape", async () => {
+    await withFlowRegistryTempDir(async (root) => {
+      const database = openOpenClawStateDatabase();
+      const databasePath = database.path;
+      const version = database.db.prepare("PRAGMA user_version").get();
+      const metadata = database.db
+        .prepare("SELECT schema_version, updated_at FROM schema_meta WHERE meta_key = 'primary'")
+        .get();
+      database.db.exec("DROP TABLE managed_flow_start_claims");
+      closeOpenClawStateDatabase();
+
+      createManagedTaskFlow({
+        ownerKey: "agent:main:ordinary",
+        controllerId: "tests/ordinary",
+        goal: "Ordinary flow",
+      });
+      expect(tableExists(openOpenClawStateDatabase().db, "managed_flow_start_claims")).toBe(false);
+      expect(claimManagedStart().claimed).toBe(true);
+      closeOpenClawStateDatabase();
+
+      const previousReader = new DatabaseSync(databasePath);
+      previousReader.prepare("UPDATE flow_runs SET updated_at = updated_at").run();
+      expect(previousReader.prepare("PRAGMA user_version").get()).toEqual(version);
+      expect(
+        previousReader
+          .prepare("SELECT schema_version, updated_at FROM schema_meta WHERE meta_key = 'primary'")
+          .get(),
+      ).toEqual(metadata);
+      previousReader.close();
+
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskFlowRegistryForTests({ persist: false });
+      expect(claimManagedStart()).toMatchObject({ claimed: true, created: false });
+    });
+  });
+
+  it("deletes the managed start claim with its flow", async () => {
+    await withFlowRegistryTempDir(async () => {
+      const first = claimManagedStart();
+      if (!first.claimed) {
+        throw new Error("Expected the managed start to persist");
+      }
+      expect(deleteTaskFlowRecordById(first.flow.flowId)).toBe(true);
+      expect(
+        openOpenClawStateDatabase()
+          .db.prepare("SELECT COUNT(*) AS count FROM managed_flow_start_claims")
+          .get(),
+      ).toEqual({ count: 0 });
+      expect(claimManagedStart()).toMatchObject({ claimed: true, created: true });
     });
   });
 

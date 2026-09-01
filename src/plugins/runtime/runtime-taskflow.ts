@@ -1,4 +1,5 @@
 // Runtime task-flow helpers adapt plugin task descriptors into executable task flows.
+import { isDeepStrictEqual } from "node:util";
 import {
   cancelFlowByIdForOwner,
   getFlowTaskSummary,
@@ -10,8 +11,13 @@ import {
   listTaskFlowsForOwner,
   resolveTaskFlowForLookupTokenForOwner,
 } from "../../tasks/task-flow-owner-access.js";
-import type { TaskFlowRecord } from "../../tasks/task-flow-registry.types.js";
 import {
+  isTerminalTaskFlow,
+  type JsonValue,
+  type TaskFlowRecord,
+} from "../../tasks/task-flow-registry.types.js";
+import {
+  claimManagedTaskFlowStart,
   createManagedTaskFlow,
   failFlow,
   finishFlow,
@@ -73,6 +79,7 @@ function applyManagedFlowMutationForOwner(params: {
   flowId: string;
   ownerKey: string;
   mutate: (flowId: string) => TaskFlowUpdateResult;
+  replay?: (flow: ManagedTaskFlowRecord) => boolean;
 }): ManagedTaskFlowMutationResult {
   // Authorization and mode checks must complete before the mutation can touch persistence.
   const flow = getTaskFlowByIdForOwner({
@@ -86,7 +93,41 @@ function applyManagedFlowMutationForOwner(params: {
   if (!managed) {
     return { applied: false, code: "not_managed", current: flow };
   }
+  // A controller may retry a completion after losing its first response. Preserve the
+  // terminal result and only acknowledge a byte-equivalent semantic replay.
+  if (isTerminalTaskFlow(managed)) {
+    return params.replay?.(managed)
+      ? { applied: true, flow: managed }
+      : { applied: false, code: "revision_conflict", current: managed };
+  }
   return mapFlowUpdateResult(params.mutate(managed.flowId));
+}
+
+function matchesTerminalReplay(params: {
+  flow: ManagedTaskFlowRecord;
+  expectedRevision: number;
+  status: "succeeded" | "failed";
+  stateJson?: JsonValue | null;
+  blockedTaskId?: string | null;
+  blockedSummary?: string | null;
+  updatedAt?: number;
+  endedAt?: number;
+}): boolean {
+  const { flow } = params;
+  if (flow.revision !== params.expectedRevision + 1 || flow.status !== params.status) {
+    return false;
+  }
+  const matchesOptionalString = (
+    current: string | undefined,
+    requested: string | null | undefined,
+  ) => requested === undefined || current === (requested?.trim() || undefined);
+  return (
+    (params.stateJson === undefined || isDeepStrictEqual(flow.stateJson, params.stateJson)) &&
+    matchesOptionalString(flow.blockedTaskId, params.blockedTaskId) &&
+    matchesOptionalString(flow.blockedSummary, params.blockedSummary) &&
+    (params.updatedAt === undefined || flow.updatedAt === params.updatedAt) &&
+    (params.endedAt === undefined || flow.endedAt === params.endedAt)
+  );
 }
 
 function createBoundTaskFlowRuntime(params: {
@@ -130,6 +171,32 @@ function createBoundTaskFlowRuntime(params: {
       return flow;
     },
     tryCreateManaged,
+    startManaged: (input) => {
+      const result = claimManagedTaskFlowStart({
+        ownerKey,
+        controllerId: input.controllerId,
+        requesterOrigin,
+        runId: input.runId,
+        toolCallId: input.toolCallId,
+        requestJson: input.requestJson,
+        runnerLease: input.runnerLease,
+        notifyPolicy: input.notifyPolicy,
+        goal: input.goal,
+        currentStep: input.currentStep,
+        stateJson: input.stateJson,
+      });
+      if (!result.claimed) {
+        return {
+          ok: false,
+          code: result.reason,
+          ...(result.current ? { current: result.current } : {}),
+        };
+      }
+      const managed = asManagedTaskFlowRecord(result.flow);
+      return managed
+        ? { ok: true, created: result.created, flow: managed }
+        : { ok: false, code: "persist_failed" };
+    },
     get: (flowId) =>
       getTaskFlowByIdForOwner({
         flowId,
@@ -190,6 +257,15 @@ function createBoundTaskFlowRuntime(params: {
       applyManagedFlowMutationForOwner({
         flowId: input.flowId,
         ownerKey,
+        replay: (flow) =>
+          matchesTerminalReplay({
+            flow,
+            expectedRevision: input.expectedRevision,
+            status: "succeeded",
+            stateJson: input.stateJson,
+            updatedAt: input.updatedAt,
+            endedAt: input.endedAt,
+          }),
         mutate: (flowId) =>
           finishFlow({
             flowId,
@@ -203,6 +279,17 @@ function createBoundTaskFlowRuntime(params: {
       applyManagedFlowMutationForOwner({
         flowId: input.flowId,
         ownerKey,
+        replay: (flow) =>
+          matchesTerminalReplay({
+            flow,
+            expectedRevision: input.expectedRevision,
+            status: "failed",
+            stateJson: input.stateJson,
+            blockedTaskId: input.blockedTaskId,
+            blockedSummary: input.blockedSummary,
+            updatedAt: input.updatedAt,
+            endedAt: input.endedAt,
+          }),
         mutate: (flowId) =>
           failFlow({
             flowId,

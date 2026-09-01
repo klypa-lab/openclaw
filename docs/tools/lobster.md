@@ -319,11 +319,14 @@ run returned. `approve` is required.
 Passing `flowControllerId` and `flowGoal` on `run` (or `flowId` and
 `flowExpectedRevision` on `resume`) drives the call through the plugin
 runtime's managed [Task Flow](/automation/taskflow) API instead of returning
-a bare envelope: OpenClaw creates or resumes a durable flow record, applies the
-Lobster envelope to it (`waiting` on approval, `succeeded`/`failed`/`cancelled` on
-completion), and returns `{ ok, envelope, flow, mutation }`. This mode requires
-a bound Task Flow runtime and is intended for plugin/controller code that needs
-durable flow state across gateway restarts, not typical ad hoc agent use.
+a bare envelope. A managed `run` returns a durable detached receipt immediately;
+OpenClaw then applies the Lobster envelope to the flow (`waiting` on approval,
+`succeeded`/`failed`/`cancelled` on completion). Retrying the same host tool
+invocation returns `already_started` with the original flow and does not launch
+a second runner. A managed `resume` returns `{ ok, envelope, flow, mutation }`
+after the resumed run settles. This mode requires a bound Task Flow runtime and
+is intended for plugin/controller code that needs durable flow state across
+gateway restarts, not typical ad hoc agent use.
 
 ## Output envelope
 

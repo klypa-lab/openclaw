@@ -9,7 +9,7 @@ import {
 } from "openclaw/plugin-sdk/param-readers";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
-import type { OpenClawPluginApi } from "../runtime-api.js";
+import type { OpenClawPluginApi, OpenClawPluginToolContext } from "../runtime-api.js";
 import {
   createEmbeddedLobsterRunner,
   resolveLobsterCwd,
@@ -27,6 +27,7 @@ import {
 type LobsterToolOptions = {
   runner?: LobsterRunner;
   taskFlow?: BoundTaskFlow;
+  getInvocationContext?: OpenClawPluginToolContext["getInvocationContext"];
 };
 
 function readOptionalTrimmedString(value: unknown, fieldName: string): string | undefined {
@@ -189,11 +190,29 @@ function resolveManagedFlowToolResult(result: ManagedLobsterFlowResult) {
   if (!result.ok) {
     throw result.error;
   }
+  if ("replayed" in result) {
+    return jsonResult({ outcome: "already_started", flow: result.flow });
+  }
   return jsonResult({
     ...result.envelope,
     flow: result.flow,
     mutation: result.mutation,
   });
+}
+
+function requireManagedStartInvocation(
+  options: LobsterToolOptions | undefined,
+  toolCallId: string,
+) {
+  const invocation = options?.getInvocationContext?.();
+  const runId = invocation?.runId?.trim();
+  if (!invocation || !runId) {
+    throw new Error("Managed TaskFlow run requires host invocation identity");
+  }
+  if (invocation.toolCallId !== toolCallId) {
+    throw new Error("Managed TaskFlow run received stale host invocation identity");
+  }
+  return { runId, toolCallId };
 }
 
 function requireTaskFlowRuntime(taskFlow: BoundTaskFlow | undefined, action: "run" | "resume") {
@@ -233,7 +252,7 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
       flowCurrentStep: Type.Optional(Type.String()),
       flowWaitingStep: Type.Optional(Type.String()),
     }),
-    async execute(_id: string, params: Record<string, unknown>) {
+    async execute(toolCallId: string, params: Record<string, unknown>) {
       const action = typeof params.action === "string" ? params.action.trim() : "";
       if (!action) {
         throw new Error("action required");
@@ -265,13 +284,16 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
       const taskFlow = options?.taskFlow;
       const flowParams = parseManagedFlowParams(action, params, runnerParams);
       if (flowParams?.action === "run") {
+        const boundTaskFlow = requireTaskFlowRuntime(taskFlow, "run");
+        const invocation = requireManagedStartInvocation(options, toolCallId);
         const launched = launchManagedLobsterFlow({
-          taskFlow: requireTaskFlowRuntime(taskFlow, "run"),
+          taskFlow: boundTaskFlow,
           config: api.config,
           runner,
           runnerParams,
           controllerId: flowParams.controllerId,
           goal: flowParams.goal,
+          invocation,
           ...(flowParams.stateJson !== undefined ? { stateJson: flowParams.stateJson } : {}),
           ...(flowParams.currentStep ? { currentStep: flowParams.currentStep } : {}),
           ...(flowParams.waitingStep ? { waitingStep: flowParams.waitingStep } : {}),
@@ -279,11 +301,16 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
         if (!launched.ok) {
           throw launched.error;
         }
-        void launched.completion;
+        if (launched.created) {
+          void launched.completion.then((completion) => {
+            if (!completion.ok) {
+              api.logger?.error?.(`Managed Lobster flow failed: ${completion.error.message}`);
+            }
+          });
+        }
         return jsonResult({
-          outcome: "started",
+          outcome: launched.created ? "started" : "already_started",
           flow: launched.flow,
-          mutation: launched.mutation,
         });
       }
       if (flowParams?.action === "resume") {

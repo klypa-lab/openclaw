@@ -13,6 +13,7 @@ import {
   freezeDiagnosticTraceContext,
 } from "../infra/diagnostic-trace-context.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
+import { runWithPluginToolInvocationContext } from "../plugins/tool-invocation-context.js";
 import { getPluginToolMeta } from "../plugins/tool-metadata.js";
 import { recordRunSkillUsage } from "../skills/runtime/run-usage.js";
 import { copyBeforeToolCallWrapperMetadata } from "./agent-tool-metadata.js";
@@ -301,6 +302,7 @@ export function wrapToolWithBeforeToolCallHook(
     return tool;
   }
   const toolName = tool.name || "tool";
+  const isPluginTool = getPluginToolMeta(tool) !== undefined;
   const diagnosticIdentity = resolveToolDiagnosticIdentity(tool);
   const hookOptions: BeforeToolCallDiagnosticOptions = {
     ...options,
@@ -543,7 +545,17 @@ export function wrapToolWithBeforeToolCallHook(
         let result: Awaited<ReturnType<ForwardedToolExecution>>;
         try {
           const args = [toolCallId, executeParams, signal, forwardedOnUpdate, ...executionArgs];
-          const invoke = () => (execute as ForwardedToolExecution)(...args);
+          const invokeRaw = () => (execute as ForwardedToolExecution)(...args);
+          const invoke = () =>
+            isPluginTool
+              ? runWithPluginToolInvocationContext(
+                  {
+                    ...(ctx?.runId ? { runId: ctx.runId } : {}),
+                    toolCallId,
+                  },
+                  invokeRaw,
+                )
+              : invokeRaw();
           result = outcome.ownerDecision
             ? await invoke()
             : await runWithGenericToolActionDecision(tool, toolCallId, invoke);

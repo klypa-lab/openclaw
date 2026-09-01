@@ -18,7 +18,10 @@ import {
 } from "../infra/kysely-sync.js";
 import { normalizeSqliteNumber } from "../infra/sqlite-number.js";
 import { withExistingOpenClawStateDatabaseReadOnly } from "../state/openclaw-state-db-readonly.js";
-import { ensureTaskFlowRunnerLeaseSchema } from "../state/openclaw-state-db-schema-additive.js";
+import {
+  ensureManagedFlowStartClaimSchema,
+  ensureTaskFlowRunnerLeaseSchema,
+} from "../state/openclaw-state-db-schema-additive.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
   closeOpenClawStateDatabase,
@@ -26,7 +29,11 @@ import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
 } from "../state/openclaw-state-db.js";
-import type { TaskFlowRegistryStoreSnapshot } from "./task-flow-registry.store.types.js";
+import type {
+  ManagedTaskFlowStartClaim,
+  ManagedTaskFlowStartClaimStoreResult,
+  TaskFlowRegistryStoreSnapshot,
+} from "./task-flow-registry.store.types.js";
 import {
   parseOptionalTaskFlowSyncMode,
   parseTaskFlowStatus,
@@ -38,7 +45,10 @@ import { parseDeliveryContextJson, parseSqliteJsonValue } from "./task-registry.
 import { parseTaskNotifyPolicy } from "./task-registry.types.js";
 
 type FlowRunsTable = OpenClawStateKyselyDatabase["flow_runs"];
-type FlowRegistryStoreDatabase = Pick<OpenClawStateKyselyDatabase, "flow_runs">;
+type FlowRegistryStoreDatabase = Pick<
+  OpenClawStateKyselyDatabase,
+  "flow_runs" | "managed_flow_start_claims"
+>;
 
 type FlowRegistryRow = Omit<Selectable<FlowRunsTable>, "runner_owner_id" | "runner_lease_id"> & {
   runner_owner_id?: string | null;
@@ -173,11 +183,8 @@ function pruneFlowsNotInSnapshot(params: { db: DatabaseSync; ids: readonly strin
   params.db.exec(`DELETE FROM ${tempTableName}`);
 }
 
-function selectFlowRows(
-  db: DatabaseSync,
-  options: { includeRunnerLease: boolean },
-): FlowRegistryRow[] {
-  const baseQuery = getFlowRegistryKysely(db)
+function selectFlowBaseQuery(db: DatabaseSync) {
+  return getFlowRegistryKysely(db)
     .selectFrom("flow_runs")
     .select([
       "flow_id",
@@ -200,6 +207,13 @@ function selectFlowRows(
       "updated_at",
       "ended_at",
     ]);
+}
+
+function selectFlowRows(
+  db: DatabaseSync,
+  options: { includeRunnerLease: boolean },
+): FlowRegistryRow[] {
+  const baseQuery = selectFlowBaseQuery(db);
   const query = (
     options.includeRunnerLease
       ? baseQuery.select(["runner_owner_id", "runner_lease_id"])
@@ -208,6 +222,15 @@ function selectFlowRows(
     .orderBy("created_at", "asc")
     .orderBy("flow_id", "asc");
   return executeSqliteQuerySync(db, query).rows;
+}
+
+function selectFlowRowById(db: DatabaseSync, flowId: string): FlowRegistryRow | undefined {
+  return executeSqliteQueryTakeFirstSync(
+    db,
+    selectFlowBaseQuery(db)
+      .select(["runner_owner_id", "runner_lease_id"])
+      .where("flow_id", "=", flowId),
+  );
 }
 
 function upsertFlowRow(db: DatabaseSync, row: Insertable<FlowRunsTable>): void {
@@ -264,6 +287,65 @@ function withWriteTransaction(write: (database: FlowRegistryDatabase) => void) {
   runOpenClawStateWriteTransaction(() => {
     write(database);
   });
+}
+
+export function claimManagedTaskFlowStartInSqlite(
+  claim: ManagedTaskFlowStartClaim,
+): ManagedTaskFlowStartClaimStoreResult {
+  const database = openFlowRegistryDatabase();
+  ensureManagedFlowStartClaimSchema(database.db);
+  return runOpenClawStateWriteTransaction(
+    ({ db }) => {
+      const kysely = getFlowRegistryKysely(db);
+      const existing = executeSqliteQueryTakeFirstSync(
+        db,
+        kysely
+          .selectFrom("managed_flow_start_claims")
+          .selectAll()
+          .where("owner_key", "=", claim.ownerKey)
+          .where("controller_id", "=", claim.controllerId)
+          .where("run_id", "=", claim.runId)
+          .where("tool_call_id", "=", claim.toolCallId),
+      );
+      if (existing) {
+        const currentRow = selectFlowRowById(db, existing.flow_id);
+        if (!currentRow) {
+          throw new Error(
+            `Managed TaskFlow start claim references missing flow ${existing.flow_id}.`,
+          );
+        }
+        const current = rowToFlowRecord(currentRow);
+        if (
+          current.syncMode !== "managed" ||
+          current.ownerKey !== claim.ownerKey ||
+          current.controllerId !== claim.controllerId
+        ) {
+          throw new Error(
+            `Managed TaskFlow start claim scope mismatch for flow ${existing.flow_id}.`,
+          );
+        }
+        return existing.request_fingerprint === claim.requestFingerprint
+          ? { claimed: true, created: false, flow: current }
+          : { claimed: false, reason: "request_conflict", current };
+      }
+
+      executeSqliteQuerySync(db, kysely.insertInto("flow_runs").values(bindFlowRecord(claim.flow)));
+      executeSqliteQuerySync(
+        db,
+        kysely.insertInto("managed_flow_start_claims").values({
+          owner_key: claim.ownerKey,
+          controller_id: claim.controllerId,
+          run_id: claim.runId,
+          tool_call_id: claim.toolCallId,
+          request_fingerprint: claim.requestFingerprint,
+          flow_id: claim.flow.flowId,
+        }),
+      );
+      return { claimed: true, created: true, flow: claim.flow };
+    },
+    {},
+    { operationLabel: "task.flow.managed-start-claim" },
+  );
 }
 
 export function loadTaskFlowRegistryStateFromSqlite(): TaskFlowRegistryStoreSnapshot {

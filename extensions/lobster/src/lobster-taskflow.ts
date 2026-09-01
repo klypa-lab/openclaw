@@ -45,6 +45,7 @@ type RunManagedLobsterFlowParams = {
   stateJson?: JsonLike;
   currentStep?: string;
   waitingStep?: string;
+  invocation: { runId: string; toolCallId: string };
 };
 
 type ResumeManagedLobsterFlowParams = {
@@ -69,6 +70,11 @@ export type ManagedLobsterFlowResult =
       mutation: MutationResult;
     }
   | {
+      ok: true;
+      replayed: true;
+      flow: FlowRecord;
+    }
+  | {
       ok: false;
       flow?: FlowRecord;
       mutation?: MutationResult;
@@ -78,9 +84,14 @@ export type ManagedLobsterFlowResult =
 export type ManagedLobsterFlowLaunchResult =
   | {
       ok: true;
+      created: true;
       flow: FlowRecord;
-      mutation: Extract<ReturnType<BoundTaskFlow["resume"]>, { applied: true }>;
       completion: Promise<ManagedLobsterFlowResult>;
+    }
+  | {
+      ok: true;
+      created: false;
+      flow: FlowRecord;
     }
   | Extract<ManagedLobsterFlowResult, { ok: false }>;
 
@@ -172,6 +183,14 @@ async function executeManagedLobsterFlow(
             waitJson: buildApprovalWaitState(envelope),
           })
         : params.taskFlow.finish(flowMutation);
+    if (!mutation.applied) {
+      return {
+        ok: false,
+        flow,
+        mutation,
+        error: new Error(`TaskFlow transition failed: ${mutation.code}`),
+      };
+    }
     return { ok: true, envelope, flow, mutation };
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
@@ -190,43 +209,30 @@ async function executeManagedLobsterFlow(
 export function launchManagedLobsterFlow(
   params: RunManagedLobsterFlowParams,
 ): ManagedLobsterFlowLaunchResult {
-  const createFlowParams = {
+  const started = params.taskFlow.startManaged({
     controllerId: params.controllerId,
     goal: params.goal,
-    status: "queued" as const,
-    currentStep: params.currentStep ?? "run_lobster",
-    ...(params.stateJson !== undefined ? { stateJson: params.stateJson } : {}),
-  };
-  const flow = params.taskFlow.tryCreateManaged
-    ? params.taskFlow.tryCreateManaged(createFlowParams)
-    : params.taskFlow.createManaged(createFlowParams);
-  if (!flow) {
-    return { ok: false, error: new Error("TaskFlow persistence failed.") };
-  }
-  const started = params.taskFlow.resume({
-    flowId: flow.flowId,
-    expectedRevision: flow.revision,
-    status: "running",
+    runId: params.invocation.runId,
+    toolCallId: params.invocation.toolCallId,
     currentStep: params.currentStep ?? "run_lobster",
     runnerLease: LOBSTER_RUNNER_LEASE,
+    requestJson: {
+      runnerParams: toJsonLike(params.runnerParams),
+      waitingStep: params.waitingStep ?? null,
+    },
+    ...(params.stateJson !== undefined ? { stateJson: params.stateJson } : {}),
   });
-  if (!started.applied) {
+  if (!started.ok) {
     return {
       ok: false,
-      flow,
-      mutation: started,
       error: new Error(`TaskFlow start failed: ${started.code}`),
     };
   }
+  if (!started.created) {
+    return { ok: true, created: false, flow: started.flow };
+  }
   const completion = executeManagedLobsterFlow(params, started.flow);
-  return { ok: true, flow: started.flow, mutation: started, completion };
-}
-
-export async function runManagedLobsterFlow(
-  params: RunManagedLobsterFlowParams,
-): Promise<ManagedLobsterFlowResult> {
-  const launched = launchManagedLobsterFlow(params);
-  return launched.ok ? await launched.completion : launched;
+  return { ok: true, created: true, flow: started.flow, completion };
 }
 
 export async function resumeManagedLobsterFlow(

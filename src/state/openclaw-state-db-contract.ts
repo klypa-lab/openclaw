@@ -57,6 +57,7 @@ export const LAZY_ADDITIVE_STATE_TABLES = [
   "device_pair_setup_completions",
   "github_publication_requests",
   "device_pairing_join_codes",
+  "managed_flow_start_claims",
   "skill_workshop_proposal_events",
   "skill_workshop_collection_reviews",
   "skill_workshop_proposal_rollbacks",

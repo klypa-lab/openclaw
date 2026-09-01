@@ -33,6 +33,26 @@ function fakeCtx(overrides: Partial<OpenClawPluginToolContext> = {}): OpenClawPl
 
 const requireRecord = createRequireRecord("record", "expected-label-record");
 
+function createManagedTool(options: NonNullable<Parameters<typeof createLobsterTool>[1]>) {
+  let activeToolCallId = "";
+  const tool = createLobsterTool(fakeApi(), {
+    ...options,
+    getInvocationContext: () => ({ runId: "test-run", toolCallId: activeToolCallId }),
+  });
+  const execute = tool.execute.bind(tool);
+  return {
+    ...tool,
+    execute: async (...args: Parameters<typeof execute>) => {
+      activeToolCallId = args[0];
+      try {
+        return await execute(...args);
+      } finally {
+        activeToolCallId = "";
+      }
+    },
+  };
+}
+
 describe("lobster plugin tool", () => {
   it("returns the Lobster envelope in details", async () => {
     const runner = {
@@ -122,7 +142,7 @@ describe("lobster plugin tool", () => {
     };
     const taskFlow = createFakeTaskFlow();
 
-    const tool = createLobsterTool(fakeApi(), { runner, taskFlow });
+    const tool = createManagedTool({ runner, taskFlow });
     const res = await tool.execute("call-default-flow-run", {
       action: "run",
       pipeline: "noop",
@@ -153,7 +173,7 @@ describe("lobster plugin tool", () => {
     "rejects resume-only fields on run before the ordinary fallback",
     async (resumeFields) => {
       const runner = { run: vi.fn() };
-      const tool = createLobsterTool(fakeApi(), {
+      const tool = createManagedTool({
         runner,
         taskFlow: createFakeTaskFlow(),
       });
@@ -182,7 +202,7 @@ describe("lobster plugin tool", () => {
     };
     const taskFlow = createFakeTaskFlow();
 
-    const tool = createLobsterTool(fakeApi(), { runner, taskFlow });
+    const tool = createManagedTool({ runner, taskFlow });
     const res = await tool.execute("call-default-flow-resume", {
       action: "resume",
       token: "resume-token-1",
@@ -230,7 +250,7 @@ describe("lobster plugin tool", () => {
     { flowStateJson: '{"lane":"email"}' },
   ])("rejects run-only fields on resume before the ordinary fallback", async (runFields) => {
     const runner = { run: vi.fn() };
-    const tool = createLobsterTool(fakeApi(), {
+    const tool = createManagedTool({
       runner,
       taskFlow: createFakeTaskFlow(),
     });
@@ -291,7 +311,7 @@ describe("lobster plugin tool", () => {
     ],
   ])("requires managed TaskFlow fields", async (params, error) => {
     const runner = { run: vi.fn() };
-    const tool = createLobsterTool(fakeApi(), {
+    const tool = createManagedTool({
       runner,
       taskFlow: createFakeTaskFlow(),
     });
@@ -308,7 +328,7 @@ describe("lobster plugin tool", () => {
     [{ action: "resume", token: 42, flowControllerId: "tests/lobster" }, "token must be a string"],
   ])("preserves mixed-invalid field error precedence", async (params, error) => {
     const runner = { run: vi.fn() };
-    const tool = createLobsterTool(fakeApi(), {
+    const tool = createManagedTool({
       runner,
       taskFlow: createFakeTaskFlow(),
     });
@@ -403,7 +423,7 @@ describe("lobster plugin tool", () => {
     };
     const taskFlow = createFakeTaskFlow();
 
-    const tool = createLobsterTool(fakeApi(), { runner, taskFlow });
+    const tool = createManagedTool({ runner, taskFlow });
     const res = await tool.execute("call-managed-run", {
       action: "run",
       pipeline: "noop",
@@ -415,22 +435,28 @@ describe("lobster plugin tool", () => {
       flowWaitingStep: "await_review",
     });
 
-    expect(taskFlow.createManaged).toHaveBeenCalledWith({
+    expect(taskFlow.startManaged).toHaveBeenCalledWith({
       controllerId: "tests/lobster",
       goal: "Run Lobster workflow",
-      status: "queued",
+      runId: "test-run",
+      toolCallId: "call-managed-run",
       currentStep: "run_lobster",
       stateJson: { lane: "email" },
-    });
-    expect(taskFlow.resume).toHaveBeenCalledWith({
-      flowId: "flow-1",
-      expectedRevision: 1,
-      status: "running",
-      currentStep: "run_lobster",
+      runnerLease: expect.objectContaining({ ownerId: "lobster" }),
+      requestJson: {
+        runnerParams: {
+          action: "run",
+          pipeline: "noop",
+          cwd: process.cwd(),
+          timeoutMs: 20_000,
+          maxStdoutBytes: 512_000,
+        },
+        waitingStep: "await_review",
+      },
     });
     expect(taskFlow.setWaiting).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 2,
+      expectedRevision: 0,
       currentStep: "await_review",
       waitJson: {
         kind: "lobster_approval",
@@ -445,8 +471,35 @@ describe("lobster plugin tool", () => {
     const flow = requireRecord(details.flow, "managed run flow details");
     expect(flow.flowId).toBe("flow-1");
     expect(flow.status).toBe("running");
-    const mutation = requireRecord(details.mutation, "managed run mutation details");
-    expect(mutation.applied).toBe(true);
+    expect(details.mutation).toBeUndefined();
+  });
+
+  it("returns the existing flow when the host replays one managed start", async () => {
+    const runner = {
+      run: vi.fn().mockResolvedValue({
+        ok: true,
+        status: "ok",
+        output: [],
+        requiresApproval: null,
+      }),
+    };
+    const taskFlow = createFakeTaskFlow();
+    const tool = createManagedTool({ runner, taskFlow });
+    const request = {
+      action: "run",
+      pipeline: "noop",
+      flowControllerId: "tests/lobster",
+      flowGoal: "Run Lobster workflow",
+    };
+
+    const first = await tool.execute("call-managed-replay", request);
+    const replay = await tool.execute("call-managed-replay", request);
+
+    expect(requireRecord(first.details, "first managed start").outcome).toBe("started");
+    const replayDetails = requireRecord(replay.details, "replayed managed start");
+    expect(replayDetails.outcome).toBe("already_started");
+    expect(requireRecord(replayDetails.flow, "replayed flow").flowId).toBe("flow-1");
+    expect(runner.run).toHaveBeenCalledOnce();
   });
 
   it("returns a managed start receipt before the runner completes", async () => {
@@ -467,7 +520,7 @@ describe("lobster plugin tool", () => {
       ),
     };
     const taskFlow = createFakeTaskFlow();
-    const tool = createLobsterTool(fakeApi(), { runner, taskFlow });
+    const tool = createManagedTool({ runner, taskFlow });
     let settled = false;
     const execution = tool
       .execute("call-managed-detached-run", {
@@ -507,7 +560,7 @@ describe("lobster plugin tool", () => {
     };
     const taskFlow = createFakeTaskFlow();
 
-    const tool = createLobsterTool(fakeApi(), { runner, taskFlow });
+    const tool = createManagedTool({ runner, taskFlow });
     await tool.execute("call-managed-run-empty-state", {
       action: "run",
       pipeline: "noop",
@@ -516,12 +569,24 @@ describe("lobster plugin tool", () => {
       flowStateJson: "{}",
     });
 
-    expect(taskFlow.createManaged).toHaveBeenCalledWith({
+    expect(taskFlow.startManaged).toHaveBeenCalledWith({
       controllerId: "tests/lobster",
       goal: "Run Lobster workflow",
-      status: "queued",
+      runId: "test-run",
+      toolCallId: "call-managed-run-empty-state",
       currentStep: "run_lobster",
       stateJson: {},
+      runnerLease: expect.objectContaining({ ownerId: "lobster" }),
+      requestJson: {
+        runnerParams: {
+          action: "run",
+          pipeline: "noop",
+          cwd: process.cwd(),
+          timeoutMs: 20_000,
+          maxStdoutBytes: 512_000,
+        },
+        waitingStep: null,
+      },
     });
     expect(runner.run).toHaveBeenCalledWith({
       action: "run",
@@ -547,8 +612,24 @@ describe("lobster plugin tool", () => {
     ).rejects.toThrow(/Managed TaskFlow run mode requires a bound taskFlow runtime/);
   });
 
-  it("rejects invalid flowStateJson in managed TaskFlow mode", async () => {
+  it("rejects managed start without host invocation identity", async () => {
     const tool = createLobsterTool(fakeApi(), {
+      runner: { run: vi.fn() },
+      taskFlow: createFakeTaskFlow(),
+    });
+
+    await expect(
+      tool.execute("call-missing-invocation", {
+        action: "run",
+        pipeline: "noop",
+        flowControllerId: "tests/lobster",
+        flowGoal: "Run Lobster workflow",
+      }),
+    ).rejects.toThrow(/requires host invocation identity/);
+  });
+
+  it("rejects invalid flowStateJson in managed TaskFlow mode", async () => {
+    const tool = createManagedTool({
       runner: { run: vi.fn() },
       taskFlow: createFakeTaskFlow(),
     });
@@ -574,7 +655,7 @@ describe("lobster plugin tool", () => {
       }),
     };
     const taskFlow = createFakeTaskFlow();
-    const tool = createLobsterTool(fakeApi(), { runner, taskFlow });
+    const tool = createManagedTool({ runner, taskFlow });
 
     const res = await tool.execute("call-managed-resume-approval-id", {
       action: "resume",
@@ -591,6 +672,7 @@ describe("lobster plugin tool", () => {
       expectedRevision: 0,
       status: "running",
       currentStep: "resume_lobster",
+      runnerLease: expect.objectContaining({ ownerId: "lobster" }),
     });
     expect(runner.run).toHaveBeenCalledWith({
       action: "resume",
@@ -617,7 +699,7 @@ describe("lobster plugin tool", () => {
       }),
     };
     const taskFlow = createFakeTaskFlow();
-    const tool = createLobsterTool(fakeApi(), { runner, taskFlow });
+    const tool = createManagedTool({ runner, taskFlow });
 
     await tool.execute("call-managed-resume-string-revision", {
       action: "resume",
@@ -633,6 +715,7 @@ describe("lobster plugin tool", () => {
       expectedRevision: 1,
       status: "running",
       currentStep: "resume_lobster",
+      runnerLease: expect.objectContaining({ ownerId: "lobster" }),
     });
     expect(runner.run).toHaveBeenCalledWith({
       action: "resume",

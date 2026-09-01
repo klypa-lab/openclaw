@@ -27,6 +27,12 @@ A managed flow has a controller: plugin code that creates the flow through the p
 - Each step runs as a background task created under the flow; the flow's owner key and requester origin carry over to child tasks.
 - The controller advances the flow between `running`, `waiting`, and terminal states, and stores arbitrary JSON step state on the flow record.
 - Every mutation passes the flow's expected revision. A stale write is rejected as a revision conflict instead of clobbering newer state.
+- A controller can claim an exact tool invocation with `startManaged`. The
+  running flow, runner lease, and invocation claim commit in one transaction,
+  so a retry cannot start the same work twice.
+- Terminal state is monotonic. An exact retry of the same successful or failed
+  completion returns the stored flow without creating another revision;
+  conflicting terminal updates are rejected.
 - Once cancellation is requested, new child tasks are refused, and the flow finalizes as `cancelled` when no child task remains active.
 
 Example: a weekly report flow that (1) gathers data, (2) generates the report, and (3) delivers it, one background task per step:
@@ -62,7 +68,7 @@ with a blocked outcome.
 
 ## Durable state and revision tracking
 
-Flow records persist in the shared SQLite state database (`~/.openclaw/state/openclaw.sqlite`, `flow_runs` table) alongside task records, so progress survives gateway restarts. Each write bumps the flow's `revision`; concurrent writers that pass a stale expected revision get a conflict and must re-read. WAL growth is bounded by SQLite autocheckpointing plus periodic passive checkpoints, with truncate checkpoints on shutdown. The legacy `flows/registry.sqlite` sidecar from older installs is imported by `openclaw doctor`.
+Flow records persist in the shared SQLite state database (`~/.openclaw/state/openclaw.sqlite`, `flow_runs` table) alongside task records, so progress survives gateway restarts. Exact managed starts use the companion `managed_flow_start_claims` table; it stores invocation identity and a request fingerprint, not the request payload. Each write bumps the flow's `revision`; concurrent writers that pass a stale expected revision get a conflict and must re-read. WAL growth is bounded by SQLite autocheckpointing plus periodic passive checkpoints, with truncate checkpoints on shutdown. The legacy `flows/registry.sqlite` sidecar from older installs is imported by `openclaw doctor`.
 
 Gateway maintenance retains finished flows for 7 days, then prunes them. This
 includes `blocked` flows with `endedAt`; resumable managed `blocked` flows are

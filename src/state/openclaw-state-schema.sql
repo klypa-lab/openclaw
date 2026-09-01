@@ -1636,6 +1636,17 @@ CREATE INDEX IF NOT EXISTS idx_flow_runs_status ON flow_runs(status);
 CREATE INDEX IF NOT EXISTS idx_flow_runs_owner_key ON flow_runs(owner_key);
 CREATE INDEX IF NOT EXISTS idx_flow_runs_updated_at ON flow_runs(updated_at);
 
+CREATE TABLE IF NOT EXISTS managed_flow_start_claims (
+  owner_key TEXT NOT NULL,
+  controller_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
+  request_fingerprint TEXT NOT NULL,
+  flow_id TEXT NOT NULL UNIQUE,
+  PRIMARY KEY (owner_key, controller_id, run_id, tool_call_id),
+  FOREIGN KEY (flow_id) REFERENCES flow_runs(flow_id) ON DELETE CASCADE
+) STRICT;
+
 -- Durable meeting-capture sessions are gateway-global rather than agent-session
 -- transcripts. JSON/JSONL files are doctor import inputs or explicit CLI exports.
 CREATE TABLE IF NOT EXISTS meeting_transcript_sessions (

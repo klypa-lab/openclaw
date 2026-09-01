@@ -33,6 +33,14 @@ export type ManagedTaskFlowMutationResult =
       current?: TaskFlowRecord;
     };
 
+type ManagedTaskFlowStartResult =
+  | { ok: true; created: boolean; flow: ManagedTaskFlowRecord }
+  | {
+      ok: false;
+      code: "request_conflict" | "persist_failed";
+      current?: TaskFlowRecord;
+    };
+
 type ManagedTaskFlowCreateParams = {
   controllerId: string;
   goal: string;
@@ -73,6 +81,17 @@ export type BoundTaskFlowRuntime = {
   readonly requesterOrigin?: TaskDeliveryState["requesterOrigin"];
   createManaged: (params: ManagedTaskFlowCreateParams) => ManagedTaskFlowRecord;
   tryCreateManaged: (params: ManagedTaskFlowCreateParams) => ManagedTaskFlowRecord | null;
+  startManaged: (
+    params: Pick<
+      ManagedTaskFlowCreateParams,
+      "controllerId" | "goal" | "notifyPolicy" | "currentStep" | "stateJson"
+    > & {
+      runId: string;
+      toolCallId: string;
+      requestJson?: JsonValue;
+      runnerLease: { ownerId: string; leaseId: string };
+    },
+  ) => ManagedTaskFlowStartResult;
   get: (flowId: string) => TaskFlowRecord | undefined;
   list: () => TaskFlowRecord[];
   findLatest: () => TaskFlowRecord | undefined;

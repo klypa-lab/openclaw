@@ -4,20 +4,32 @@ import { describe, expect, it, vi } from "vitest";
 import type { LobsterRunner } from "./lobster-runner.js";
 import {
   LOBSTER_RUNNER_LEASE,
+  launchManagedLobsterFlow,
+  type ManagedLobsterFlowResult,
   resumeManagedLobsterFlow,
-  runManagedLobsterFlow,
 } from "./lobster-taskflow.js";
 import { createFakeTaskFlow } from "./taskflow-test-helpers.js";
 
-function expectManagedFlowFailure(
-  result: Awaited<ReturnType<typeof runManagedLobsterFlow | typeof resumeManagedLobsterFlow>>,
-) {
+function expectManagedFlowFailure(result: ManagedLobsterFlowResult) {
   expect(result.ok).toBe(false);
   if (result.ok) {
     throw new Error("Expected managed Lobster flow to fail");
   }
   return result;
 }
+
+async function runManagedLobsterFlow(
+  params: Parameters<typeof launchManagedLobsterFlow>[0],
+): Promise<ManagedLobsterFlowResult> {
+  const launched = launchManagedLobsterFlow(params);
+  if (!launched.ok) {
+    return launched;
+  }
+  return launched.created
+    ? await launched.completion
+    : { ok: true, replayed: true, flow: launched.flow };
+}
+
 function createRunner(result: Awaited<ReturnType<LobsterRunner["run"]>>): LobsterRunner {
   return {
     run: vi.fn().mockResolvedValue(result),
@@ -41,6 +53,7 @@ function createRunFlowParams(
     },
     controllerId: "tests/lobster",
     goal: "Run Lobster workflow",
+    invocation: { runId: "run-1", toolCallId: "call-1" },
   };
 }
 
@@ -66,6 +79,37 @@ function createResumeFlowParams(
 }
 
 describe("runManagedLobsterFlow", () => {
+  it("replays one managed start without launching a second runner", async () => {
+    const taskFlow = createFakeTaskFlow();
+    const runner = createRunner({
+      ok: true,
+      status: "ok",
+      output: [],
+      requiresApproval: null,
+    });
+    const params = {
+      ...createRunFlowParams(taskFlow, runner),
+      invocation: { runId: "run-1", toolCallId: "call-1" },
+    };
+
+    const first = launchManagedLobsterFlow(params);
+    const replay = launchManagedLobsterFlow(params);
+    expect(first.ok).toBe(true);
+    expect(replay.ok).toBe(true);
+    if (!first.ok || !replay.ok) {
+      throw new Error("Expected both starts to resolve");
+    }
+    expect(first.created).toBe(true);
+    expect(replay.created).toBe(false);
+    if (!first.created) {
+      throw new Error("Expected the first start to launch");
+    }
+    await first.completion;
+
+    expect(replay.flow.flowId).toBe(first.flow.flowId);
+    expect(runner.run).toHaveBeenCalledOnce();
+  });
+
   it("creates a flow and finishes it when Lobster succeeds", async () => {
     const taskFlow = createFakeTaskFlow();
     const runner = createRunner({
@@ -78,23 +122,49 @@ describe("runManagedLobsterFlow", () => {
     const result = await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner));
 
     expect(result.ok).toBe(true);
-    expect(taskFlow.createManaged).toHaveBeenCalledWith({
+    expect(taskFlow.startManaged).toHaveBeenCalledWith({
       controllerId: "tests/lobster",
       goal: "Run Lobster workflow",
-      status: "queued",
-      currentStep: "run_lobster",
-    });
-    expect(taskFlow.resume).toHaveBeenCalledWith({
-      flowId: "flow-1",
-      expectedRevision: 1,
-      status: "running",
+      runId: "run-1",
+      toolCallId: "call-1",
       currentStep: "run_lobster",
       runnerLease: LOBSTER_RUNNER_LEASE,
+      requestJson: {
+        runnerParams: {
+          action: "run",
+          pipeline: "noop",
+          cwd: process.cwd(),
+          timeoutMs: 1000,
+          maxStdoutBytes: 4096,
+        },
+        waitingStep: null,
+      },
     });
     expect(taskFlow.finish).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 2,
+      expectedRevision: 0,
     });
+  });
+
+  it("reports a rejected completion instead of hiding it", async () => {
+    const taskFlow = createFakeTaskFlow({
+      finish: vi.fn().mockReturnValue({
+        applied: false,
+        code: "revision_conflict",
+      }),
+    });
+    const runner = createRunner({
+      ok: true,
+      status: "ok",
+      output: [],
+      requiresApproval: null,
+    });
+
+    const result = expectManagedFlowFailure(
+      await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner)),
+    );
+
+    expect(result.error.message).toMatch(/revision_conflict/u);
   });
 
   it("serializes cyclic and supported approval items before waiting", async () => {
@@ -142,7 +212,7 @@ describe("runManagedLobsterFlow", () => {
     expect(result.ok).toBe(true);
     expect(taskFlow.setWaiting).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 2,
+      expectedRevision: 0,
       currentStep: "await_lobster_approval",
       waitJson: {
         kind: "lobster_approval",
@@ -165,6 +235,32 @@ describe("runManagedLobsterFlow", () => {
     });
   });
 
+  it("reports a rejected approval wait instead of hiding it", async () => {
+    const taskFlow = createFakeTaskFlow({
+      setWaiting: vi.fn().mockReturnValue({
+        applied: false,
+        code: "revision_conflict",
+      }),
+    });
+    const runner = createRunner({
+      ok: true,
+      status: "needs_approval",
+      output: [],
+      requiresApproval: {
+        type: "approval_request",
+        prompt: "Approve this?",
+        items: [],
+        resumeToken: "resume-1",
+      },
+    });
+
+    const result = expectManagedFlowFailure(
+      await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner)),
+    );
+
+    expect(result.error.message).toMatch(/revision_conflict/u);
+  });
+
   it("fails the flow when Lobster returns an error envelope", async () => {
     const taskFlow = createFakeTaskFlow();
     const runner = createRunner({
@@ -181,7 +277,7 @@ describe("runManagedLobsterFlow", () => {
     expect(result.error.message).toBe("boom");
     expect(taskFlow.fail).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 2,
+      expectedRevision: 0,
     });
   });
 
@@ -197,7 +293,7 @@ describe("runManagedLobsterFlow", () => {
     expect(result.error.message).toBe("crashed");
     expect(taskFlow.fail).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 2,
+      expectedRevision: 0,
     });
   });
 });

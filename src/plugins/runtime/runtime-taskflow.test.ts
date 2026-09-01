@@ -12,7 +12,6 @@ import {
 import { createRuntimeTaskFlow } from "./runtime-taskflow.js";
 
 type BoundTaskFlow = ReturnType<ReturnType<typeof createRuntimeTaskFlow>["bindSession"]>;
-type MutationName = "setWaiting" | "resume" | "finish" | "fail" | "requestCancel";
 
 function requireCreatedFlow<T>(flow: T | null): T {
   if (!flow) {
@@ -81,6 +80,48 @@ describe("runtime TaskFlow", () => {
     expect(created.requesterOrigin?.channel).toBe("discord");
     expect(created.requesterOrigin?.to).toBe("channel:123");
     expect(created.requesterOrigin?.threadId).toBe("thread:456");
+  });
+
+  it("starts one owner-bound managed flow for an exact invocation", () => {
+    const runtime = createRuntimeTaskFlow();
+    const taskFlow = runtime.bindSession({ sessionKey: "agent:main:main" });
+    const input = {
+      controllerId: "tests/runtime-taskflow/start",
+      goal: "Run once",
+      currentStep: "run_lobster",
+      runId: "run-1",
+      toolCallId: "call-1",
+      requestJson: { pipeline: "noop" },
+      runnerLease: { ownerId: "lobster", leaseId: "lease-1" },
+    };
+
+    const first = taskFlow.startManaged(input);
+    expect(first).toMatchObject({
+      ok: true,
+      created: true,
+      flow: { status: "running", revision: 0, runnerLeaseId: "lease-1" },
+    });
+    const replay = taskFlow.startManaged({
+      ...input,
+      runnerLease: { ownerId: "lobster", leaseId: "lease-replay" },
+    });
+    expect(replay).toMatchObject({ ok: true, created: false });
+    if (!first.ok || !replay.ok) {
+      throw new Error("Expected exact managed starts to resolve");
+    }
+    expect(replay.flow.flowId).toBe(first.flow.flowId);
+    expect(replay.flow.runnerLeaseId).toBe("lease-1");
+    expect(taskFlow.startManaged({ ...input, requestJson: { pipeline: "changed" } })).toMatchObject(
+      { ok: false, code: "request_conflict" },
+    );
+
+    const otherOwner = runtime.bindSession({ sessionKey: "agent:main:other" });
+    const isolated = otherOwner.startManaged(input);
+    expect(isolated).toMatchObject({ ok: true, created: true });
+    if (!isolated.ok) {
+      throw new Error("Expected another owner to receive an isolated flow");
+    }
+    expect(isolated.flow.flowId).not.toBe(first.flow.flowId);
   });
 
   it("lists only stale running leases for the exact runner owner", () => {
@@ -203,7 +244,7 @@ describe("runtime TaskFlow", () => {
     expect(summary.active).toBe(1);
   });
 
-  it("applies each managed transition exactly once with its explicit payload", () => {
+  it("keeps terminal state monotonic and replays the same successful completion", () => {
     const taskFlow = createRuntimeTaskFlow().bindSession({ sessionKey: "agent:main:main" });
     const created = requireCreatedFlow(
       taskFlow.createManaged({
@@ -211,64 +252,94 @@ describe("runtime TaskFlow", () => {
         goal: "Apply transitions",
       }),
     );
-    const transitions: Array<[name: MutationName, input: Record<string, unknown>, status: string]> =
-      [
-        [
-          "setWaiting",
-          {
-            currentStep: "await_review",
-            stateJson: { phase: "waiting" },
-            waitJson: { kind: "approval" },
-            blockedTaskId: "task-review",
-            blockedSummary: "Review required",
-            updatedAt: 20,
-          },
-          "blocked",
-        ],
-        [
-          "resume",
-          {
-            status: "running",
-            currentStep: "continue_work",
-            stateJson: { phase: "running" },
-            updatedAt: 30,
-          },
-          "running",
-        ],
-        ["finish", { stateJson: { phase: "done" }, updatedAt: 40, endedAt: 41 }, "succeeded"],
-        [
-          "fail",
-          {
-            stateJson: { phase: "failed" },
-            blockedTaskId: "task-failed",
-            blockedSummary: "Task failed",
-            updatedAt: 50,
-            endedAt: 51,
-          },
-          "failed",
-        ],
-        ["requestCancel", { cancelRequestedAt: 60 }, "failed"],
-      ];
+    const waiting = taskFlow.setWaiting({
+      flowId: created.flowId,
+      expectedRevision: 0,
+      currentStep: "await_review",
+      stateJson: { phase: "waiting" },
+      waitJson: { kind: "approval" },
+      blockedTaskId: "task-review",
+      blockedSummary: "Review required",
+      updatedAt: 20,
+    });
+    expect(waiting).toMatchObject({ applied: true, flow: { revision: 1, status: "blocked" } });
+    const resumed = taskFlow.resume({
+      flowId: created.flowId,
+      expectedRevision: 1,
+      status: "running",
+      currentStep: "continue_work",
+      stateJson: { phase: "running" },
+      updatedAt: 30,
+    });
+    expect(resumed).toMatchObject({ applied: true, flow: { revision: 2, status: "running" } });
 
-    for (const [index, [name, input, status]] of transitions.entries()) {
-      const mutate = taskFlow[name] as BoundTaskFlow["setWaiting"];
-      const result = mutate({
-        flowId: created.flowId,
-        expectedRevision: index,
-        ...input,
+    const completion = {
+      flowId: created.flowId,
+      expectedRevision: 2,
+      stateJson: { phase: "done" },
+      updatedAt: 40,
+      endedAt: 41,
+    } as const;
+    const finished = taskFlow.finish(completion);
+    expect(finished).toMatchObject({
+      applied: true,
+      flow: { revision: 3, status: "succeeded", stateJson: { phase: "done" } },
+    });
+    expect(taskFlow.finish(completion)).toEqual(finished);
+    expect(getTaskFlowById(created.flowId)?.revision).toBe(3);
+
+    const changedReplay = taskFlow.finish({
+      ...completion,
+      stateJson: { phase: "different" },
+    });
+    expect(changedReplay).toMatchObject({
+      applied: false,
+      code: "revision_conflict",
+      current: { revision: 3, status: "succeeded" },
+    });
+
+    const terminalMutations = [
+      taskFlow.setWaiting({ flowId: created.flowId, expectedRevision: 3 }),
+      taskFlow.resume({ flowId: created.flowId, expectedRevision: 3 }),
+      taskFlow.fail({ flowId: created.flowId, expectedRevision: 3 }),
+      taskFlow.requestCancel({ flowId: created.flowId, expectedRevision: 3 }),
+    ];
+    for (const mutation of terminalMutations) {
+      expect(mutation).toMatchObject({
+        applied: false,
+        code: "revision_conflict",
+        current: { revision: 3, status: "succeeded" },
       });
-      expect(result.applied, name).toBe(true);
-      if (!result.applied) {
-        throw new Error(`expected ${name} to apply`);
-      }
-      expect(result.flow, name).toMatchObject({
-        ...input,
-        status,
-        flowId: created.flowId,
-        revision: index + 1,
-      });
-      expect(getTaskFlowById(created.flowId)?.revision, name).toBe(index + 1);
     }
+    expect(getTaskFlowById(created.flowId)).toMatchObject({ revision: 3, status: "succeeded" });
+  });
+
+  it("replays the same failed completion without changing its revision", () => {
+    const taskFlow = createRuntimeTaskFlow().bindSession({ sessionKey: "agent:main:main" });
+    const created = requireCreatedFlow(
+      taskFlow.createManaged({
+        controllerId: "tests/runtime-taskflow/failure-replay",
+        goal: "Preserve failure",
+      }),
+    );
+    const completion = {
+      flowId: created.flowId,
+      expectedRevision: 0,
+      stateJson: { phase: "failed" },
+      blockedTaskId: "task-failed",
+      blockedSummary: "Task failed",
+      updatedAt: 50,
+      endedAt: 51,
+    } as const;
+    const failed = taskFlow.fail(completion);
+    expect(failed).toMatchObject({ applied: true, flow: { revision: 1, status: "failed" } });
+    expect(taskFlow.fail(completion)).toEqual(failed);
+    expect(taskFlow.finish({ flowId: created.flowId, expectedRevision: 1 })).toMatchObject({
+      applied: false,
+      code: "revision_conflict",
+      current: { revision: 1, status: "failed" },
+    });
+    expect(getTaskFlowById(created.flowId)).toMatchObject({ revision: 1, status: "failed" });
   });
 
   it("rejects invalid mutation targets before writing and preserves conflict mapping", () => {

@@ -92,6 +92,7 @@ function createTaskFlowSessionMock(): BoundTaskFlowRuntime {
     sessionKey: "agent:main:main",
     createManaged: vi.fn<BoundTaskFlowRuntime["createManaged"]>(),
     tryCreateManaged: vi.fn<BoundTaskFlowRuntime["tryCreateManaged"]>(),
+    startManaged: vi.fn<BoundTaskFlowRuntime["startManaged"]>(),
     get: vi.fn<BoundTaskFlowRuntime["get"]>(),
     list: vi.fn<BoundTaskFlowRuntime["list"]>(() => []),
     findLatest: vi.fn<BoundTaskFlowRuntime["findLatest"]>(),

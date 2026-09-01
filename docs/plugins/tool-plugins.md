@@ -175,6 +175,13 @@ Factories still declare a fixed tool name up front. Use `definePluginEntry`
 directly when the plugin computes tool names dynamically or combines tools
 with hooks, services, providers, or commands.
 
+For tools that need execution correlation, capture
+`toolContext.getInvocationContext` in the factory and call it only inside the
+tool's `execute` callback. It returns the current host `runId` and `toolCallId`.
+Outside that callback, including retained or detached continuations, it returns
+`undefined`. These values support tracing and idempotency; they do not grant
+authority.
+
 ## Return values
 
 `defineToolPlugin` wraps plain return values into the OpenClaw tool-result

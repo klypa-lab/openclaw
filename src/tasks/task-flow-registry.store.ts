@@ -1,17 +1,23 @@
 // Stores managed task-flow records in memory and notifies registry observers.
 import {
   closeTaskFlowRegistryDatabase,
+  claimManagedTaskFlowStartInSqlite,
   deleteTaskFlowRegistryRecordFromSqlite,
   loadTaskFlowRegistryStateFromSqlite,
   saveTaskFlowRegistryStateToSqlite,
   upsertTaskFlowRegistryRecordToSqlite,
 } from "./task-flow-registry.store.sqlite.js";
-import type { TaskFlowRegistryStoreSnapshot } from "./task-flow-registry.store.types.js";
+import type {
+  ManagedTaskFlowStartClaim,
+  ManagedTaskFlowStartClaimStoreResult,
+  TaskFlowRegistryStoreSnapshot,
+} from "./task-flow-registry.store.types.js";
 import type { TaskFlowRecord } from "./task-flow-registry.types.js";
 
-type TaskFlowRegistryStore = {
+export type TaskFlowRegistryStore = {
   loadSnapshot: () => TaskFlowRegistryStoreSnapshot;
   saveSnapshot: (snapshot: TaskFlowRegistryStoreSnapshot) => void;
+  claimManagedStart?: (claim: ManagedTaskFlowStartClaim) => ManagedTaskFlowStartClaimStoreResult;
   upsertFlow?: (flow: TaskFlowRecord) => void;
   deleteFlow?: (flowId: string) => void;
   close?: () => void;
@@ -41,6 +47,7 @@ type TaskFlowRegistryObservers = {
 const defaultFlowRegistryStore: TaskFlowRegistryStore = {
   loadSnapshot: loadTaskFlowRegistryStateFromSqlite,
   saveSnapshot: saveTaskFlowRegistryStateToSqlite,
+  claimManagedStart: claimManagedTaskFlowStartInSqlite,
   upsertFlow: upsertTaskFlowRegistryRecordToSqlite,
   deleteFlow: deleteTaskFlowRegistryRecordFromSqlite,
   close: closeTaskFlowRegistryDatabase,

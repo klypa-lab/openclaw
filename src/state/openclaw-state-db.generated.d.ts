@@ -733,6 +733,15 @@ export interface MacosPortGuardianRecords {
   timestamp: number;
 }
 
+export interface ManagedFlowStartClaims {
+  controller_id: string;
+  flow_id: string;
+  owner_key: string;
+  request_fingerprint: string;
+  run_id: string;
+  tool_call_id: string;
+}
+
 export interface ManagedOutgoingImageRecords {
   agent_id: string | null;
   alt: string;
@@ -1575,6 +1584,7 @@ export interface DB {
   gateway_restart_sentinel: GatewayRestartSentinel;
   github_publication_requests: GithubPublicationRequests;
   macos_port_guardian_records: MacosPortGuardianRecords;
+  managed_flow_start_claims: ManagedFlowStartClaims;
   managed_outgoing_image_records: ManagedOutgoingImageRecords;
   mcp_oauth_pending_authorizations: McpOauthPendingAuthorizations;
   mcp_oauth_stores: McpOauthStores;

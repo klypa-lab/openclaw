@@ -723,6 +723,18 @@ snapshots; OpenClaw owns all persistence and lifecycle coordination.
     });
     ```
 
+    Use `startManaged(...)` when a tool invocation starts detached work. Pass
+    the current host `runId` and `toolCallId`, a request payload, and the runner
+    lease. The flow and exact-start claim are committed together. Repeating the
+    same controller, run, tool call, and request returns the existing flow with
+    `created: false`; changing the request returns `request_conflict` and starts
+    no work. Read the invocation values from
+    `toolContext.getInvocationContext()` inside the tool's `execute` callback.
+
+    Managed terminal transitions are monotonic. Repeating the same `finish` or
+    `fail` transition acknowledges the stored result without adding a revision;
+    a different terminal transition is rejected as a revision conflict.
+
     Use `bindSession({ sessionKey, requesterOrigin })` when you already have a trusted OpenClaw session key from your own binding layer. Do not bind from raw user input.
 
   </Accordion>

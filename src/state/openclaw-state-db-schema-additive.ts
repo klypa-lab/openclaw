@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { runSqliteImmediateTransactionSync } from "../infra/sqlite-transaction.js";
 import {
   CLAW_FIRST_USE_ADDITIVE_STATE_COLUMN_DEFINITIONS,
   CLAW_STARTUP_ADDITIVE_STATE_COLUMN_DEFINITIONS,
@@ -32,6 +33,7 @@ const DEVICE_PAIRING_JOIN_CODE_SCHEMA_START =
 const DEVICE_PAIRING_JOIN_CODE_SCHEMA_END = "\n) STRICT;";
 const CONFIG_REVISION_KEY_SCHEMA_START = "CREATE TABLE IF NOT EXISTS config_revision_keys (";
 const CONFIG_REVISION_KEY_SCHEMA_END = "\n) STRICT;";
+const managedFlowStartClaimEnsuredDatabases = new WeakSet<DatabaseSync>();
 
 function secretStoreSchemaSql(): string {
   const start = OPENCLAW_STATE_SCHEMA_SQL.indexOf(SECRET_STORE_SCHEMA_START);
@@ -150,6 +152,24 @@ export function ensureDevicePairSetupBootstrapSchema(database: DatabaseSync): vo
 export function ensureTaskFlowRunnerLeaseSchema(database: DatabaseSync): void {
   ensureColumn(database, "flow_runs", "runner_owner_id TEXT");
   ensureColumn(database, "flow_runs", "runner_lease_id TEXT");
+}
+
+/** Lazily installs durable exact-start claims when TaskFlow first starts managed work. */
+export function ensureManagedFlowStartClaimSchema(database: DatabaseSync): void {
+  if (managedFlowStartClaimEnsuredDatabases.has(database)) {
+    return;
+  }
+  const start = OPENCLAW_STATE_SCHEMA_SQL.indexOf(
+    "CREATE TABLE IF NOT EXISTS managed_flow_start_claims (",
+  );
+  const end = OPENCLAW_STATE_SCHEMA_SQL.indexOf("\n) STRICT;", start);
+  if (start < 0 || end < start) {
+    throw new Error("Managed TaskFlow start claim schema marker is missing.");
+  }
+  runSqliteImmediateTransactionSync(database, () => {
+    database.exec(OPENCLAW_STATE_SCHEMA_SQL.slice(start, end + "\n) STRICT;".length)); // sqlite-allow-raw -- Canonical additive DDL only.
+  });
+  managedFlowStartClaimEnsuredDatabases.add(database);
 }
 
 /** Installs environment-owned node binding columns at first cloud enrollment use. */

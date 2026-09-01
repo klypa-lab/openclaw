@@ -90,6 +90,14 @@ describe("openclaw plugin tool context", () => {
     expect(result.context.sessionId).toBe("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
   });
 
+  it("exposes a closed execution-time invocation reader", () => {
+    const result = resolveOpenClawPluginToolInputs({
+      options: { config: {} as never },
+    });
+
+    expect(result.context.getInvocationContext?.()).toBeUndefined();
+  });
+
   it("forwards trusted private conversation recall context", () => {
     const conversationRecall = {
       anchorSessionKey: "agent:main:telegram:direct:owner",

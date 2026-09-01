@@ -1,5 +1,6 @@
 // Coordinates managed task-flow creation, updates, ownership, and snapshots.
 import crypto from "node:crypto";
+import { stableStringify } from "@openclaw/normalization-core/stable-stringify";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -104,6 +105,14 @@ export type TaskFlowUpdateResult =
       current?: TaskFlowRecord;
     };
 
+type ManagedTaskFlowStartClaimResult =
+  | { claimed: true; created: boolean; flow: TaskFlowRecord }
+  | {
+      claimed: false;
+      reason: "request_conflict" | "persist_failed";
+      current?: TaskFlowRecord;
+    };
+
 type TaskFlowSyncResult =
   | {
       ok: true;
@@ -200,6 +209,17 @@ function assertControllerId(controllerId?: string | null): string {
   const normalized = normalizeOptionalString(controllerId);
   if (!normalized) {
     throw new Error("Managed flow controllerId is required.");
+  }
+  return normalized;
+}
+
+function assertManagedStartIdentity(value: string, label: string): string {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized) {
+    throw new Error(`Managed TaskFlow start requires ${label}.`);
+  }
+  if (normalized.length > 512) {
+    throw new Error(`Managed TaskFlow start ${label} is too long.`);
   }
   return normalized;
 }
@@ -501,6 +521,93 @@ export function createManagedTaskFlow(
     syncMode: "managed",
     controllerId: assertControllerId(params.controllerId),
   });
+}
+
+export function claimManagedTaskFlowStart(
+  params: Pick<
+    FlowRecordCreateFields,
+    "ownerKey" | "requesterOrigin" | "notifyPolicy" | "goal" | "currentStep" | "stateJson"
+  > & {
+    controllerId: string;
+    runId: string;
+    toolCallId: string;
+    requestJson?: JsonValue;
+    runnerLease: { ownerId: string; leaseId: string };
+  },
+): ManagedTaskFlowStartClaimResult {
+  ensureTaskFlowRegistryReady();
+  const ownerKey = assertFlowOwnerKey(params.ownerKey);
+  const controllerId = assertControllerId(params.controllerId);
+  const runId = assertManagedStartIdentity(params.runId, "runId");
+  const toolCallId = assertManagedStartIdentity(params.toolCallId, "toolCallId");
+  const runnerOwnerId = assertManagedStartIdentity(params.runnerLease.ownerId, "runner ownerId");
+  const runnerLeaseId = assertManagedStartIdentity(params.runnerLease.leaseId, "runner leaseId");
+  const record: TaskFlowRecord = {
+    ...buildFlowRecord({
+      ...params,
+      ownerKey,
+      controllerId,
+      syncMode: "managed",
+      status: "running",
+    }),
+    runnerOwnerId,
+    runnerLeaseId,
+  };
+  const requestFingerprint = crypto
+    .createHash("sha256")
+    .update(
+      stableStringify({
+        version: 1,
+        controllerId,
+        goal: record.goal,
+        notifyPolicy: record.notifyPolicy,
+        currentStep: record.currentStep ?? null,
+        stateJson: record.stateJson ?? null,
+        runnerOwnerId,
+        requestJson: params.requestJson ?? null,
+      }),
+    )
+    .digest("hex");
+  const claimManagedStart = getTaskFlowRegistryStore().claimManagedStart;
+  if (!claimManagedStart) {
+    return { claimed: false, reason: "persist_failed" };
+  }
+  try {
+    const result = claimManagedStart({
+      ownerKey,
+      controllerId,
+      runId,
+      toolCallId,
+      requestFingerprint,
+      flow: cloneFlowRecord(record),
+    });
+    const current = normalizeRestoredFlowRecord(result.claimed ? result.flow : result.current);
+    flows.set(current.flowId, current);
+    if (!result.claimed) {
+      return {
+        claimed: false,
+        reason: result.reason,
+        current: cloneFlowRecord(current),
+      };
+    }
+    if (result.created) {
+      emitFlowRegistryObserverEvent(() => ({
+        kind: "upserted",
+        flow: cloneFlowRecord(current),
+      }));
+    }
+    return {
+      claimed: true,
+      created: result.created,
+      flow: cloneFlowRecord(current),
+    };
+  } catch (error) {
+    log.warn("Failed to persist managed TaskFlow start claim", {
+      controllerId,
+      error,
+    });
+    return { claimed: false, reason: "persist_failed" };
+  }
 }
 
 export function createTaskFlowForTask(params: {
