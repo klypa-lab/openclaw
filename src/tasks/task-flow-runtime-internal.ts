@@ -15,6 +15,7 @@ export {
   resumeFlow,
   setFlowWaiting,
   syncFlowFromTaskResult,
+  updateFlowProgress,
   updateFlowRecordByIdExpectedRevision,
 } from "./task-flow-registry.js";
 

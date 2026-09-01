@@ -726,6 +726,24 @@ export function setFlowWaiting(params: {
   });
 }
 
+export function updateFlowProgress(params: {
+  flowId: string;
+  expectedRevision: number;
+  currentStep?: string | null;
+  stateJson?: JsonValue | null;
+  updatedAt?: number;
+}): TaskFlowUpdateResult {
+  return updateFlowRecordByIdExpectedRevision({
+    flowId: params.flowId,
+    expectedRevision: params.expectedRevision,
+    patch: {
+      currentStep: params.currentStep,
+      stateJson: params.stateJson,
+      updatedAt: params.updatedAt,
+    },
+  });
+}
+
 export function resumeFlow(params: {
   flowId: string;
   expectedRevision: number;

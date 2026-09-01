@@ -98,6 +98,7 @@ function createTaskFlowSessionMock(): BoundTaskFlowRuntime {
     findLatest: vi.fn<BoundTaskFlowRuntime["findLatest"]>(),
     resolve: vi.fn<BoundTaskFlowRuntime["resolve"]>(),
     getTaskSummary: vi.fn<BoundTaskFlowRuntime["getTaskSummary"]>(),
+    updateProgress: vi.fn<BoundTaskFlowRuntime["updateProgress"]>(),
     setWaiting: vi.fn<BoundTaskFlowRuntime["setWaiting"]>(),
     resume: vi.fn<BoundTaskFlowRuntime["resume"]>(),
     finish: vi.fn<BoundTaskFlowRuntime["finish"]>(),

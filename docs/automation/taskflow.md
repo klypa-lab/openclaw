@@ -27,6 +27,8 @@ A managed flow has a controller: plugin code that creates the flow through the p
 - Each step runs as a background task created under the flow; the flow's owner key and requester origin carry over to child tasks.
 - The controller advances the flow between `running`, `waiting`, and terminal states, and stores arbitrary JSON step state on the flow record.
 - Every mutation passes the flow's expected revision. A stale write is rejected as a revision conflict instead of clobbering newer state.
+- `updateProgress` records the current step and optional JSON state without
+  changing lifecycle status, wait metadata, or runner ownership.
 - A controller can claim an exact tool invocation with `startManaged`. The
   running flow, runner lease, and invocation claim commit in one transaction,
   so a retry cannot start the same work twice.

@@ -715,9 +715,16 @@ snapshots; OpenClaw owns all persistence and lifecycle coordination.
       startedAt: Date.now(),
     });
 
-    const waiting = taskFlow.setWaiting({
+    const progress = taskFlow.updateProgress({
       flowId: created.flowId,
       expectedRevision: created.revision,
+      currentStep: "review",
+      stateJson: { completed: 1, total: 3 },
+    });
+
+    const waiting = taskFlow.setWaiting({
+      flowId: created.flowId,
+      expectedRevision: progress.applied ? progress.flow.revision : created.revision,
       currentStep: "await-human-reply",
       waitJson: { kind: "reply", channel: "telegram" },
     });
@@ -734,6 +741,9 @@ snapshots; OpenClaw owns all persistence and lifecycle coordination.
     Managed terminal transitions are monotonic. Repeating the same `finish` or
     `fail` transition acknowledges the stored result without adding a revision;
     a different terminal transition is rejected as a revision conflict.
+    `updateProgress(...)` changes `currentStep` and optional JSON state without
+    changing lifecycle status, wait metadata, or runner ownership. It uses the
+    same expected-revision check and cannot change a terminal flow.
 
     Use `bindSession({ sessionKey, requesterOrigin })` when you already have a trusted OpenClaw session key from your own binding layer. Do not bind from raw user input.
 

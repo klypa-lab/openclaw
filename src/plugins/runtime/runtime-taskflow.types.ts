@@ -97,6 +97,13 @@ export type BoundTaskFlowRuntime = {
   findLatest: () => TaskFlowRecord | undefined;
   resolve: (token: string) => TaskFlowRecord | undefined;
   getTaskSummary: (flowId: string) => TaskRegistrySummary | undefined;
+  updateProgress: (params: {
+    flowId: string;
+    expectedRevision: number;
+    currentStep?: string | null;
+    stateJson?: JsonValue | null;
+    updatedAt?: number;
+  }) => ManagedTaskFlowMutationResult;
   setWaiting: (params: {
     flowId: string;
     expectedRevision: number;

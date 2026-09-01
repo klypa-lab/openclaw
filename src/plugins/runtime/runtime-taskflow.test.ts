@@ -11,8 +11,6 @@ import {
 } from "./runtime-task-test-harness.js";
 import { createRuntimeTaskFlow } from "./runtime-taskflow.js";
 
-type BoundTaskFlow = ReturnType<ReturnType<typeof createRuntimeTaskFlow>["bindSession"]>;
-
 function requireCreatedFlow<T>(flow: T | null): T {
   if (!flow) {
     throw new Error("expected managed TaskFlow creation to succeed");
@@ -312,6 +310,67 @@ describe("runtime TaskFlow", () => {
       });
     }
     expect(getTaskFlowById(created.flowId)).toMatchObject({ revision: 3, status: "succeeded" });
+  });
+
+  it("updates progress without changing lifecycle state and rejects late progress", () => {
+    const taskFlow = createRuntimeTaskFlow().bindSession({ sessionKey: "agent:main:progress" });
+    const started = taskFlow.startManaged({
+      controllerId: "tests/runtime-taskflow/progress",
+      goal: "Track durable progress",
+      currentStep: "prepare",
+      runId: "run-progress",
+      toolCallId: "call-progress",
+      runnerLease: { ownerId: "lobster", leaseId: "lease-progress" },
+    });
+    if (!started.ok) {
+      throw new Error("expected managed TaskFlow start to succeed");
+    }
+
+    const progress = taskFlow.updateProgress({
+      flowId: started.flow.flowId,
+      expectedRevision: 0,
+      currentStep: "verify",
+      stateJson: { completed: 1, total: 2 },
+      updatedAt: 20,
+    });
+    expect(progress).toMatchObject({
+      applied: true,
+      flow: {
+        revision: 1,
+        status: "running",
+        currentStep: "verify",
+        stateJson: { completed: 1, total: 2 },
+        runnerOwnerId: "lobster",
+        runnerLeaseId: "lease-progress",
+      },
+    });
+
+    const finished = taskFlow.finish({
+      flowId: started.flow.flowId,
+      expectedRevision: 1,
+      updatedAt: 30,
+      endedAt: 30,
+    });
+    expect(finished).toMatchObject({
+      applied: true,
+      flow: { revision: 2, status: "succeeded", currentStep: "verify" },
+    });
+    expect(
+      taskFlow.updateProgress({
+        flowId: started.flow.flowId,
+        expectedRevision: 2,
+        currentStep: "late",
+      }),
+    ).toMatchObject({
+      applied: false,
+      code: "revision_conflict",
+      current: { revision: 2, status: "succeeded", currentStep: "verify" },
+    });
+    expect(taskFlow.get(started.flow.flowId)).toMatchObject({
+      revision: 2,
+      status: "succeeded",
+      currentStep: "verify",
+    });
   });
 
   it("replays the same failed completion without changing its revision", () => {

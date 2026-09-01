@@ -26,6 +26,7 @@ import {
   requestFlowCancel,
   resumeFlow,
   setFlowWaiting,
+  updateFlowProgress,
 } from "../../tasks/task-flow-runtime-internal.js";
 import type { TaskDeliveryState } from "../../tasks/task-registry.types.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
@@ -222,6 +223,19 @@ function createBoundTaskFlowRuntime(params: {
       });
       return flow ? getFlowTaskSummary(flow.flowId) : undefined;
     },
+    updateProgress: (input) =>
+      applyManagedFlowMutationForOwner({
+        flowId: input.flowId,
+        ownerKey,
+        mutate: (flowId) =>
+          updateFlowProgress({
+            flowId,
+            expectedRevision: input.expectedRevision,
+            currentStep: input.currentStep,
+            stateJson: input.stateJson,
+            updatedAt: input.updatedAt,
+          }),
+      }),
     setWaiting: (input) =>
       applyManagedFlowMutationForOwner({
         flowId: input.flowId,
