@@ -80,7 +80,8 @@ export function buildMockResponses() {
         "lobster",
         {
           action: "run",
-          pipeline: "commands.list",
+          pipeline:
+            "exec --json=true node -e 'process.stdout.write(JSON.stringify({schemaVersion:1,currentStep:\"commands_list\"}))' | openclaw.taskflow.progress | commands.list",
           flowControllerId: FLOW_CONTROLLER_ID,
           flowGoal: FLOW_GOAL,
           flowStateJson: JSON.stringify(FLOW_STATE),

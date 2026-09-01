@@ -80,6 +80,9 @@ function assertFlow(filePath) {
   if (flow.status !== "succeeded" || typeof flow.endedAt !== "number") {
     throw new Error(`TaskFlow is not terminal: ${JSON.stringify(flow)}`);
   }
+  if (flow.currentStep !== "commands_list" || flow.revision !== 2) {
+    throw new Error(`TaskFlow progress was not preserved: ${JSON.stringify(flow)}`);
+  }
   if (JSON.stringify(flow.stateJson) !== JSON.stringify(FLOW_STATE)) {
     throw new Error(`TaskFlow trace state mismatch: ${JSON.stringify(flow.stateJson)}`);
   }
