@@ -60,6 +60,10 @@ export function createFakeTaskFlow(overrides?: Partial<BoundTaskFlow>): BoundTas
     findLatest: vi.fn(),
     resolve: vi.fn(),
     getTaskSummary: vi.fn(),
+    updateProgress: vi.fn().mockImplementation((input) => ({
+      applied: true,
+      flow: { ...baseFlow, revision: input.expectedRevision + 1 },
+    })),
     setWaiting: vi.fn().mockImplementation((input) => ({
       applied: true,
       flow: { ...baseFlow, revision: input.expectedRevision + 1, status: "waiting" as const },
@@ -76,7 +80,14 @@ export function createFakeTaskFlow(overrides?: Partial<BoundTaskFlow>): BoundTas
       applied: true,
       flow: { ...baseFlow, revision: input.expectedRevision + 1, status: "failed" as const },
     })),
-    requestCancel: vi.fn(),
+    requestCancel: vi.fn().mockImplementation((input) => ({
+      applied: true,
+      flow: {
+        ...baseFlow,
+        revision: input.expectedRevision + 1,
+        cancelRequestedAt: Date.now(),
+      },
+    })),
     cancel: vi.fn(),
     runTask: vi.fn(),
     ...overrides,

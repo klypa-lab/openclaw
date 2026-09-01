@@ -146,6 +146,120 @@ describe("runManagedLobsterFlow", () => {
     });
   });
 
+  it("finishes from the latest revision after Lobster reports progress", async () => {
+    const taskFlow = createRuntimeTaskFlow().bindSession({
+      sessionKey: "agent:main:lobster-progress",
+    });
+    const runner: LobsterRunner = {
+      run: vi.fn(async (params) => {
+        const reportProgress = params.onTaskFlowEvent;
+        if (!reportProgress) {
+          throw new Error("Managed Lobster progress is unavailable");
+        }
+        await reportProgress({ schemaVersion: 1, currentStep: "verify" });
+        return {
+          ok: true as const,
+          status: "ok" as const,
+          output: [],
+          requiresApproval: null,
+        };
+      }),
+    };
+
+    const result = await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner));
+
+    expect(result).toMatchObject({
+      ok: true,
+      flow: { status: "succeeded", revision: 2, currentStep: "verify" },
+    });
+  });
+
+  it("serializes progress reported by parallel Lobster branches", async () => {
+    const taskFlow = createRuntimeTaskFlow().bindSession({
+      sessionKey: "agent:main:lobster-parallel-progress",
+    });
+    const runner: LobsterRunner = {
+      run: vi.fn(async (params) => {
+        const reportProgress = params.onTaskFlowEvent;
+        if (!reportProgress) {
+          throw new Error("Managed Lobster progress is unavailable");
+        }
+        const first = reportProgress({ schemaVersion: 1, currentStep: "parallel_first" });
+        const second = reportProgress({ schemaVersion: 1, currentStep: "parallel_second" });
+        await Promise.all([first, second]);
+        return {
+          ok: true as const,
+          status: "ok" as const,
+          output: [],
+          requiresApproval: null,
+        };
+      }),
+    };
+
+    const result = await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner));
+
+    expect(result).toMatchObject({
+      ok: true,
+      flow: { status: "succeeded", revision: 3, currentStep: "parallel_second" },
+    });
+  });
+
+  it("does not let an old runner finish a replacement run", async () => {
+    const taskFlow = createRuntimeTaskFlow().bindSession({
+      sessionKey: "agent:main:lobster-replacement-run",
+    });
+    const runner: LobsterRunner = {
+      run: vi.fn(async (params) => {
+        const reportProgress = params.onTaskFlowEvent;
+        if (!reportProgress) {
+          throw new Error("Managed Lobster progress is unavailable");
+        }
+        await reportProgress({ schemaVersion: 1, currentStep: "old_runner" });
+        const running = taskFlow.findLatest();
+        if (!running) {
+          throw new Error("Expected a running TaskFlow");
+        }
+        const waiting = taskFlow.setWaiting({
+          flowId: running.flowId,
+          expectedRevision: running.revision,
+          currentStep: "replacement_wait",
+        });
+        if (!waiting.applied) {
+          throw new Error(`Expected waiting transition: ${waiting.code}`);
+        }
+        const resumed = taskFlow.resume({
+          flowId: waiting.flow.flowId,
+          expectedRevision: waiting.flow.revision,
+          status: "running",
+          currentStep: "replacement_run",
+          runnerLease: { ownerId: "replacement", leaseId: "lease-replacement" },
+        });
+        if (!resumed.applied) {
+          throw new Error(`Expected replacement run: ${resumed.code}`);
+        }
+        return {
+          ok: true as const,
+          status: "ok" as const,
+          output: [],
+          requiresApproval: null,
+        };
+      }),
+    };
+
+    const result = expectManagedFlowFailure(
+      await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner)),
+    );
+
+    expect(result.error.message).toMatch(/revision_conflict/u);
+    expect(taskFlow.findLatest()).toMatchObject({
+      status: "running",
+      revision: 3,
+      currentStep: "replacement_run",
+      runnerOwnerId: "replacement",
+      runnerLeaseId: "lease-replacement",
+    });
+  });
+
   it("reports a rejected completion instead of hiding it", async () => {
     const taskFlow = createFakeTaskFlow({
       finish: vi.fn().mockReturnValue({
@@ -565,4 +679,32 @@ describe("cancelled managed Lobster flows", () => {
       expect(taskFlow.fail).not.toHaveBeenCalled();
     },
   );
+
+  it("returns the authoritative flow when cancellation throws", async () => {
+    const runtimeTaskFlow = createRuntimeTaskFlow().bindSession({
+      sessionKey: "agent:main:lobster-cancel-throws",
+    });
+    const taskFlow = {
+      ...runtimeTaskFlow,
+      cancel: vi.fn().mockRejectedValue(new Error("cancel transport error")),
+    };
+    const runner = createRunner({
+      ok: true,
+      status: "cancelled",
+      output: [],
+      requiresApproval: null,
+    });
+
+    const result = expectManagedFlowFailure(
+      await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner)),
+    );
+
+    expect(result.error.message).toBe("cancel transport error");
+    expect(result.flow).toMatchObject({
+      status: "running",
+      revision: 1,
+      currentStep: "run_lobster",
+      cancelRequestedAt: expect.any(Number),
+    });
+  });
 });

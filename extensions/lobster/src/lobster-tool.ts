@@ -196,7 +196,6 @@ function resolveManagedFlowToolResult(result: ManagedLobsterFlowResult) {
   return jsonResult({
     ...result.envelope,
     flow: result.flow,
-    mutation: result.mutation,
   });
 }
 

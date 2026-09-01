@@ -323,10 +323,25 @@ a bare envelope. A managed `run` returns a durable detached receipt immediately;
 OpenClaw then applies the Lobster envelope to the flow (`waiting` on approval,
 `succeeded`/`failed`/`cancelled` on completion). Retrying the same host tool
 invocation returns `already_started` with the original flow and does not launch
-a second runner. A managed `resume` returns `{ ok, envelope, flow, mutation }`
-after the resumed run settles. This mode requires a bound Task Flow runtime and
-is intended for plugin/controller code that needs durable flow state across
-gateway restarts, not typical ad hoc agent use.
+a second runner. A managed `resume` returns the Lobster envelope plus the
+authoritative `flow` after the resumed run settles.
+
+A managed workflow can report its current step by passing a JSON progress event
+through `openclaw.taskflow.progress`:
+
+```text
+... | openclaw.taskflow.progress --field taskFlowEvent
+```
+
+The selected value must have the form
+`{"schemaVersion":1,"currentStep":"verify"}`. The command persists the step on
+the same Task Flow record and passes the original pipeline item through
+unchanged. Each update advances the flow revision. A late update cannot replace
+a terminal flow state.
+
+Managed mode requires a bound Task Flow runtime and is intended for
+plugin/controller code that needs durable flow state across gateway restarts,
+not typical ad hoc agent use.
 
 ## Output envelope
 

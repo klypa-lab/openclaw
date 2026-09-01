@@ -1,5 +1,6 @@
 // Lobster plugin module implements lobster taskflow behavior.
 import crypto from "node:crypto";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { OpenClawPluginApi } from "../runtime-api.js";
 import type { LobsterEnvelope, LobsterRunner, LobsterRunnerParams } from "./lobster-runner.js";
 
@@ -23,9 +24,9 @@ export const LOBSTER_RUNNER_LEASE = Object.freeze({
   ownerId: "lobster",
   leaseId: crypto.randomUUID(),
 });
-type MutationResult =
-  | ReturnType<BoundTaskFlow["setWaiting"]>
-  | Awaited<ReturnType<BoundTaskFlow["cancel"]>>;
+type FlowMutationResult = ReturnType<BoundTaskFlow["finish"]>;
+type MutationResult = FlowMutationResult | Awaited<ReturnType<BoundTaskFlow["cancel"]>>;
+type OwnedFlowRevision = { current: number };
 
 type LobsterApprovalWaitState = {
   kind: "lobster_approval";
@@ -34,6 +35,15 @@ type LobsterApprovalWaitState = {
   resumeToken?: string;
   approvalId?: string;
 };
+
+type LobsterTaskFlowProgressEvent = {
+  schemaVersion: 1;
+  currentStep: string;
+};
+
+const TASK_FLOW_PROGRESS_EVENT_KEYS = new Set(["schemaVersion", "currentStep"]);
+const MAX_TASK_FLOW_PROGRESS_EVENT_BYTES = 4096;
+const MAX_TASK_FLOW_CURRENT_STEP_BYTES = 256;
 
 type RunManagedLobsterFlowParams = {
   taskFlow: BoundTaskFlow;
@@ -145,9 +155,69 @@ function buildApprovalWaitState(envelope: Extract<LobsterEnvelope, { ok: true }>
   } satisfies LobsterApprovalWaitState;
 }
 
+function parseTaskFlowProgressEvent(event: unknown): LobsterTaskFlowProgressEvent {
+  let encoded: string | undefined;
+  try {
+    encoded = JSON.stringify(event);
+  } catch {
+    throw new Error("TaskFlow progress event must be JSON serializable");
+  }
+  if (encoded === undefined) {
+    throw new Error("TaskFlow progress event must be JSON serializable");
+  }
+  if (Buffer.byteLength(encoded, "utf8") > MAX_TASK_FLOW_PROGRESS_EVENT_BYTES) {
+    throw new Error("TaskFlow progress event exceeds 4 KiB");
+  }
+  if (!isRecord(event)) {
+    throw new Error("TaskFlow progress event must be a JSON object");
+  }
+  const unknownKey = Object.keys(event).find((key) => !TASK_FLOW_PROGRESS_EVENT_KEYS.has(key));
+  if (unknownKey) {
+    throw new Error(`TaskFlow progress event contains unknown field: ${unknownKey}`);
+  }
+  if (event.schemaVersion !== 1) {
+    throw new Error("TaskFlow progress event requires schemaVersion 1");
+  }
+  if (typeof event.currentStep !== "string" || !event.currentStep.trim()) {
+    throw new Error("TaskFlow progress event requires currentStep");
+  }
+  const currentStep = event.currentStep.trim();
+  if (Buffer.byteLength(currentStep, "utf8") > MAX_TASK_FLOW_CURRENT_STEP_BYTES) {
+    throw new Error("TaskFlow progress event currentStep exceeds 256 bytes");
+  }
+  return { schemaVersion: 1, currentStep };
+}
+
+function isManagedFlow(value: ReturnType<BoundTaskFlow["get"]>): value is FlowRecord {
+  return value?.syncMode === "managed" && typeof value.controllerId === "string";
+}
+
+function asManagedFlow(value: ReturnType<BoundTaskFlow["get"]>): FlowRecord | undefined {
+  return isManagedFlow(value) ? value : undefined;
+}
+
+function applyManagedLobsterProgress(params: {
+  taskFlow: BoundTaskFlow;
+  flowId: string;
+  expectedRevision: number;
+  event: unknown;
+}): number {
+  const event = parseTaskFlowProgressEvent(params.event);
+  const mutation = params.taskFlow.updateProgress({
+    flowId: params.flowId,
+    expectedRevision: params.expectedRevision,
+    currentStep: event.currentStep,
+  });
+  if (mutation.applied) {
+    return mutation.flow.revision;
+  }
+  throw new Error(`TaskFlow progress event persistence failed: ${mutation.code}`);
+}
+
 async function runWithTaskFlowCancellation(params: {
   taskFlow: BoundTaskFlow;
   flowId: string;
+  ownedRevision: OwnedFlowRevision;
   runner: LobsterRunner;
   runnerParams: LobsterRunnerParams;
 }): Promise<LobsterEnvelope> {
@@ -173,7 +243,19 @@ async function runWithTaskFlowCancellation(params: {
     const signal = params.runnerParams.signal
       ? AbortSignal.any([params.runnerParams.signal, controller.signal])
       : controller.signal;
-    const envelope = await params.runner.run({ ...params.runnerParams, signal });
+    const envelope = await params.runner.run({
+      ...params.runnerParams,
+      signal,
+      onTaskFlowEvent: (event) => {
+        params.ownedRevision.current = applyManagedLobsterProgress({
+          taskFlow: params.taskFlow,
+          flowId: params.flowId,
+          expectedRevision: params.ownedRevision.current,
+          event,
+        });
+        return Promise.resolve();
+      },
+    });
     checkCancellation();
     controller.signal.throwIfAborted();
     return envelope;
@@ -189,67 +271,113 @@ async function executeManagedLobsterFlow(
   >,
   flow: FlowRecord,
 ): Promise<ManagedLobsterFlowResult> {
+  // Only revisions committed by this runner may advance its authority. Adopting
+  // a refreshed revision could let a stale runner settle a replacement run.
+  const ownedRevision: OwnedFlowRevision = { current: flow.revision };
   try {
     const envelope = await runWithTaskFlowCancellation({
       taskFlow: params.taskFlow,
       flowId: flow.flowId,
+      ownedRevision,
       runner: params.runner,
       runnerParams: params.runnerParams,
     });
     if (envelope.ok && envelope.status === "cancelled") {
       try {
+        const requested = params.taskFlow.requestCancel({
+          flowId: flow.flowId,
+          expectedRevision: ownedRevision.current,
+        });
+        if (!requested.applied) {
+          return {
+            ok: false,
+            flow: asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow,
+            mutation: requested,
+            error: new Error(`TaskFlow cancellation failed: ${requested.code}`),
+          };
+        }
+        ownedRevision.current = requested.flow.revision;
         const mutation = await params.taskFlow.cancel({ flowId: flow.flowId, cfg: params.config });
+        const current = asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow;
         return mutation.cancelled
-          ? { ok: true, envelope, flow, mutation }
+          ? { ok: true, envelope, flow: current, mutation }
           : {
               ok: false,
-              flow,
+              flow: current,
               mutation,
               error: new Error(`TaskFlow cancellation failed: ${mutation.reason ?? "unknown"}`),
             };
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
-        return { ok: false, flow, error: err };
+        return {
+          ok: false,
+          flow: asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow,
+          error: err,
+        };
       }
     }
-    const flowMutation = { flowId: flow.flowId, expectedRevision: flow.revision };
     if (!envelope.ok) {
-      const mutation = params.taskFlow.fail(flowMutation);
-      return { ok: false, flow, mutation, error: new Error(envelope.error.message) };
+      const mutation = params.taskFlow.fail({
+        flowId: flow.flowId,
+        expectedRevision: ownedRevision.current,
+      });
+      return {
+        ok: false,
+        flow: mutation.applied
+          ? mutation.flow
+          : (asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow),
+        mutation,
+        error: new Error(envelope.error.message),
+      };
     }
     const mutation =
       envelope.status === "needs_approval"
         ? params.taskFlow.setWaiting({
-            ...flowMutation,
+            flowId: flow.flowId,
+            expectedRevision: ownedRevision.current,
             currentStep: params.waitingStep ?? "await_lobster_approval",
             waitJson: buildApprovalWaitState(envelope),
           })
-        : params.taskFlow.finish(flowMutation);
+        : params.taskFlow.finish({
+            flowId: flow.flowId,
+            expectedRevision: ownedRevision.current,
+          });
     if (!mutation.applied) {
       return {
         ok: false,
-        flow,
+        flow: asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow,
         mutation,
         error: new Error(`TaskFlow transition failed: ${mutation.code}`),
       };
     }
-    return { ok: true, envelope, flow, mutation };
+    return { ok: true, envelope, flow: mutation.flow, mutation };
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
-    const persisted = params.taskFlow.get(flow.flowId);
+    const persisted = asManagedFlow(params.taskFlow.get(flow.flowId));
     // Cancellation is already terminal state; a runner rejection must not
     // replace it with failure after the abort reaches embedded Lobster work.
     if (persisted?.status === "cancelled" || persisted?.cancelRequestedAt != null) {
-      return { ok: false, flow, error: err };
+      return { ok: false, flow: persisted, error: err };
     }
     try {
       const mutation = params.taskFlow.fail({
         flowId: flow.flowId,
-        expectedRevision: flow.revision,
+        expectedRevision: ownedRevision.current,
       });
-      return { ok: false, flow, mutation, error: err };
+      return {
+        ok: false,
+        flow: mutation.applied
+          ? mutation.flow
+          : (asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow),
+        mutation,
+        error: err,
+      };
     } catch {
-      return { ok: false, flow, error: err };
+      return {
+        ok: false,
+        flow: asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow,
+        error: err,
+      };
     }
   }
 }

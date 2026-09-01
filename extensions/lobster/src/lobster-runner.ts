@@ -4,6 +4,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { toErrorObject as toLintErrorObject } from "openclaw/plugin-sdk/error-runtime";
 import { isPathInside } from "openclaw/plugin-sdk/file-access-runtime";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 export type LobsterEnvelope =
   | {
@@ -34,6 +35,7 @@ export type LobsterRunnerParams = {
   timeoutMs: number;
   maxStdoutBytes: number;
   signal?: AbortSignal;
+  onTaskFlowEvent?: (event: unknown) => Promise<void>;
 };
 
 export type LobsterRunner = {
@@ -48,6 +50,7 @@ type EmbeddedToolContext = {
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
   signal?: AbortSignal;
+  registry?: EmbeddedCommandRegistry;
 };
 
 type EmbeddedToolEnvelope = {
@@ -66,6 +69,7 @@ type EmbeddedToolEnvelope = {
 };
 
 type EmbeddedToolRuntime = {
+  createDefaultRegistry?: () => EmbeddedCommandRegistry;
   runToolRequest: (params: {
     pipeline?: string;
     filePath?: string;
@@ -80,7 +84,73 @@ type EmbeddedToolRuntime = {
   }) => Promise<EmbeddedToolEnvelope>;
 };
 
+type EmbeddedCommand = {
+  name: string;
+  meta: {
+    description: string;
+    argsSchema: Record<string, unknown>;
+    sideEffects: string[];
+  };
+  help: () => string;
+  run: (params: {
+    input: AsyncIterable<unknown>;
+    args: Record<string, unknown>;
+  }) => Promise<{ output: AsyncIterable<unknown> }>;
+};
+
+type EmbeddedCommandRegistry = {
+  get: (name: string) => EmbeddedCommand | undefined;
+  list: () => string[];
+};
+
 const workflowExts = new Set([".lobster", ".yaml", ".yml", ".json"]);
+const TASK_FLOW_PROGRESS_COMMAND = "openclaw.taskflow.progress";
+
+function createOpenClawRegistry(
+  runtime: EmbeddedToolRuntime,
+  onTaskFlowEvent: (event: unknown) => Promise<void>,
+): EmbeddedCommandRegistry {
+  const base = runtime.createDefaultRegistry?.();
+  if (!base) {
+    throw new Error("Lobster embedded runtime does not expose createDefaultRegistry");
+  }
+  const progressCommand: EmbeddedCommand = {
+    name: TASK_FLOW_PROGRESS_COMMAND,
+    meta: {
+      description: "Persist one controller-owned TaskFlow progress event",
+      argsSchema: {
+        type: "object",
+        properties: {
+          field: { type: "string" },
+          _: { type: "array", items: { type: "string" } },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+      sideEffects: ["taskflow_state"],
+    },
+    help: () => `${TASK_FLOW_PROGRESS_COMMAND} [--field taskFlowEvent]`,
+    async run({ input, args }) {
+      const field = typeof args.field === "string" && args.field.trim() ? args.field.trim() : null;
+      return {
+        output: (async function* () {
+          for await (const item of input) {
+            const selected = field && isRecord(item) ? item[field] : item;
+            if (selected === undefined) {
+              throw new Error(`TaskFlow progress event field is missing: ${field}`);
+            }
+            await onTaskFlowEvent(selected);
+            yield item;
+          }
+        })(),
+      };
+    },
+  };
+  return {
+    get: (name) => (name === TASK_FLOW_PROGRESS_COMMAND ? progressCommand : base.get(name)),
+    list: () => [...new Set([...base.list(), TASK_FLOW_PROGRESS_COMMAND])].toSorted(),
+  };
+}
 
 export function resolveLobsterCwd(cwdRaw: unknown): string {
   if (typeof cwdRaw !== "string" || !cwdRaw.trim()) {
@@ -250,6 +320,9 @@ export function createEmbeddedLobsterRunner(options?: {
         const runtime = await runtimePromise;
         signal.throwIfAborted();
         const ctx = createEmbeddedToolContext(params, signal);
+        if (params.onTaskFlowEvent) {
+          ctx.registry = createOpenClawRegistry(runtime, params.onTaskFlowEvent);
+        }
         let envelope: EmbeddedToolEnvelope;
 
         if (params.action === "run") {

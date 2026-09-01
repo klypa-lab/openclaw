@@ -88,6 +88,76 @@ describe("createEmbeddedLobsterRunner", () => {
     });
   });
 
+  it("injects a pass-through command for managed TaskFlow progress", async () => {
+    type TestCommand = {
+      run: (params: {
+        input: AsyncIterable<unknown>;
+        args: Record<string, unknown>;
+      }) => Promise<{ output: AsyncIterable<unknown> }>;
+    };
+    type TestRegistry = {
+      get: (name: string) => TestCommand | undefined;
+      list: () => string[];
+    };
+    const progressEvent = { schemaVersion: 1, currentStep: "verify" };
+    const onTaskFlowEvent = vi.fn().mockResolvedValue(undefined);
+    const runtime = {
+      createDefaultRegistry: vi.fn(
+        (): TestRegistry => ({
+          get: () => undefined,
+          list: () => ["exec"],
+        }),
+      ),
+      runToolRequest: vi.fn(async ({ ctx }: { ctx?: { registry?: TestRegistry } }) => {
+        const registry = ctx?.registry;
+        if (!registry) {
+          throw new Error("expected injected registry");
+        }
+        const command = registry.get("openclaw.taskflow.progress");
+        if (!command) {
+          throw new Error("expected TaskFlow progress command");
+        }
+        expect(registry.list()).toEqual(["exec", "openclaw.taskflow.progress"]);
+        const result = await command.run({
+          input: (async function* () {
+            yield { taskFlowEvent: progressEvent, output: "kept" };
+          })(),
+          args: { field: "taskFlowEvent" },
+        });
+        const output: unknown[] = [];
+        for await (const item of result.output) {
+          output.push(item);
+        }
+        return {
+          ok: true,
+          protocolVersion: 1,
+          status: "ok" as const,
+          output,
+          requiresApproval: null,
+        };
+      }),
+      resumeToolRequest: vi.fn(),
+    };
+    const runner = createEmbeddedLobsterRunner({
+      loadRuntime: vi.fn().mockResolvedValue(runtime),
+    });
+
+    const envelope = await runner.run({
+      action: "run",
+      pipeline: "json | openclaw.taskflow.progress --field taskFlowEvent",
+      cwd: process.cwd(),
+      timeoutMs: 2000,
+      maxStdoutBytes: 4096,
+      onTaskFlowEvent,
+    });
+
+    expect(onTaskFlowEvent).toHaveBeenCalledWith(progressEvent);
+    expect(envelope).toMatchObject({
+      ok: true,
+      output: [{ taskFlowEvent: progressEvent, output: "kept" }],
+    });
+  });
+
   it.each(["inline", "workflow", "resume"])(
     "bounds the model-visible result for an embedded %s request",
     async (requestKind) => {

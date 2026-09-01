@@ -595,6 +595,7 @@ describe("lobster plugin tool", () => {
       timeoutMs: 20_000,
       maxStdoutBytes: 512_000,
       signal: expect.any(AbortSignal),
+      onTaskFlowEvent: expect.any(Function),
     });
   });
 
@@ -683,12 +684,13 @@ describe("lobster plugin tool", () => {
       timeoutMs: 20_000,
       maxStdoutBytes: 512_000,
       signal: expect.any(AbortSignal),
+      onTaskFlowEvent: expect.any(Function),
     });
     const details = requireRecord(res.details, "managed resume lobster tool details");
     expect(details.ok).toBe(true);
     expect(details.status).toBe("ok");
-    const mutation = requireRecord(details.mutation, "managed resume mutation details");
-    expect(mutation.applied).toBe(true);
+    expect(requireRecord(details.flow, "managed resume flow details").status).toBe("succeeded");
+    expect(details.mutation).toBeUndefined();
   });
 
   it("normalizes numeric string flowExpectedRevision before managed resume", async () => {
@@ -727,6 +729,7 @@ describe("lobster plugin tool", () => {
       timeoutMs: 20_000,
       maxStdoutBytes: 512_000,
       signal: expect.any(AbortSignal),
+      onTaskFlowEvent: expect.any(Function),
     });
   });
 
