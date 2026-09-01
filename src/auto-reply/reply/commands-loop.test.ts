@@ -49,8 +49,17 @@ function rewrittenBody(params: HandleCommandsParams): string {
   return (params.ctx as { BodyForAgent?: string }).BodyForAgent ?? "";
 }
 
+function declarationKey(params: HandleCommandsParams): string {
+  const match = rewrittenBody(params).match(/declarationKey:"([^"]+)"/u);
+  if (!match?.[1]) {
+    throw new Error("expected loop declaration key");
+  }
+  return match[1];
+}
+
 // Mirrors the handler's conversation tag for the fixture sessionKey.
 const LOOP_PREFIX = `loop[${createHash("sha256").update("agent:main:webchat:test").digest("hex").slice(0, 12)}]`;
+const LOOP_DECLARATION_KEY = `loop:v1:${createHash("sha256").update("agent:main:webchat:test").digest("hex").slice(0, 12)}:${createHash("sha256").update("check ci").digest("hex")}`;
 
 describe("loop command", () => {
   it("ignores non-loop text", async () => {
@@ -73,6 +82,7 @@ describe("loop command", () => {
     expect(rewrittenBody(params)).toContain('schedule:{kind:"every",everyMs:300000}');
     expect(rewrittenBody(params)).toContain('sessionTarget:"current"');
     expect(rewrittenBody(params)).toContain(`"${LOOP_PREFIX} check ci"`);
+    expect(rewrittenBody(params)).toContain(`declarationKey:"${LOOP_DECLARATION_KEY}"`);
     expect(rewrittenBody(params)).toContain("do not use the message tool");
     // Loop work orders are model-facing prompts: they must teach the canonical
     // automations tool, never the legacy cron alias (RFC 0026).
@@ -94,6 +104,34 @@ describe("loop command", () => {
     expect(rewrittenBody(params)).toContain('pacing:{min:"1m",max:"1h"}');
     expect(rewrittenBody(params)).toContain('action:\\"next_check\\"');
     expect(rewrittenBody(params)).toContain('in:\\"<duration>\\"');
+  });
+
+  it("keeps one declaration across cadence changes for the same conversation and prompt", async () => {
+    const fiveMinutes = buildLoopParams("/loop 5m check ci");
+    const tenMinutes = buildLoopParams("/loop 10m check ci");
+    const selfPaced = buildLoopParams("/loop check ci");
+
+    await handleLoopCommand(fiveMinutes, true);
+    await handleLoopCommand(tenMinutes, true);
+    await handleLoopCommand(selfPaced, true);
+
+    expect(declarationKey(tenMinutes)).toBe(declarationKey(fiveMinutes));
+    expect(declarationKey(selfPaced)).toBe(declarationKey(fiveMinutes));
+  });
+
+  it("separates loop declarations by full prompt and conversation", async () => {
+    const commonPrefix = "check the deployment status for the production environment";
+    const first = buildLoopParams(`/loop ${commonPrefix} alpha`);
+    const differentPrompt = buildLoopParams(`/loop ${commonPrefix} beta`);
+    const differentConversation = buildLoopParams(`/loop ${commonPrefix} alpha`);
+    differentConversation.sessionKey = "agent:main:webchat:other";
+
+    await handleLoopCommand(first, true);
+    await handleLoopCommand(differentPrompt, true);
+    await handleLoopCommand(differentConversation, true);
+
+    expect(declarationKey(differentPrompt)).not.toBe(declarationKey(first));
+    expect(declarationKey(differentConversation)).not.toBe(declarationKey(first));
   });
 
   it("rewrites /loop status as a conversation-scoped list work order", async () => {

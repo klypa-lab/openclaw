@@ -32,6 +32,12 @@ function loopNamePrefix(sessionKey: string): string {
   return `loop[${loopConversationTag(sessionKey)}]`;
 }
 
+function loopDeclarationKey(prompt: string, sessionKey: string): string {
+  // Cadence stays mutable: repeating the same prompt converges on one conversation-owned job.
+  const promptHash = createHash("sha256").update(prompt.trim()).digest("hex");
+  return `loop:v1:${loopConversationTag(sessionKey)}:${promptHash}`;
+}
+
 const LOOP_FINAL_REPLY_ONLY =
   "Reply with your normal final message only; do not use the message tool.";
 
@@ -55,15 +61,17 @@ function buildLoopPayloadMessage(params: {
 function buildFixedLoopWorkOrder(prompt: string, everyMs: number, sessionKey: string): string {
   const shortName = loopShortName(prompt);
   const jobName = `${loopNamePrefix(sessionKey)} ${shortName}`;
+  const declarationKey = loopDeclarationKey(prompt, sessionKey);
   const message = buildLoopPayloadMessage({ prompt, shortName, selfPaced: false });
-  return `Create a recurring loop with the ${AUTOMATIONS_TOOL_NAME} tool, then confirm in one short line (name + cadence + '/loop stop' hint). ${LOOP_FINAL_REPLY_ONLY} action:"add", job:{name:${JSON.stringify(jobName)},schedule:{kind:"every",everyMs:${everyMs}},sessionTarget:"current",payload:{kind:"agentTurn",message:${JSON.stringify(message)}}}.`;
+  return `Create a recurring loop with the ${AUTOMATIONS_TOOL_NAME} tool, then confirm in one short line (name + cadence + '/loop stop' hint). ${LOOP_FINAL_REPLY_ONLY} action:"add", job:{name:${JSON.stringify(jobName)},declarationKey:${JSON.stringify(declarationKey)},schedule:{kind:"every",everyMs:${everyMs}},sessionTarget:"current",payload:{kind:"agentTurn",message:${JSON.stringify(message)}}}.`;
 }
 
 function buildSelfPacedLoopWorkOrder(prompt: string, sessionKey: string): string {
   const shortName = loopShortName(prompt);
   const jobName = `${loopNamePrefix(sessionKey)} ${shortName}`;
+  const declarationKey = loopDeclarationKey(prompt, sessionKey);
   const message = buildLoopPayloadMessage({ prompt, shortName, selfPaced: true });
-  return `Create a recurring loop with the ${AUTOMATIONS_TOOL_NAME} tool, then confirm in one short line (name + cadence + '/loop stop' hint). ${LOOP_FINAL_REPLY_ONLY} action:"add", job:{name:${JSON.stringify(jobName)},schedule:{kind:"every",everyMs:${LOOP_DEFAULT_INTERVAL_MS}},pacing:{min:"1m",max:"1h"},sessionTarget:"current",payload:{kind:"agentTurn",message:${JSON.stringify(message)}}}.`;
+  return `Create a recurring loop with the ${AUTOMATIONS_TOOL_NAME} tool, then confirm in one short line (name + cadence + '/loop stop' hint). ${LOOP_FINAL_REPLY_ONLY} action:"add", job:{name:${JSON.stringify(jobName)},declarationKey:${JSON.stringify(declarationKey)},schedule:{kind:"every",everyMs:${LOOP_DEFAULT_INTERVAL_MS}},pacing:{min:"1m",max:"1h"},sessionTarget:"current",payload:{kind:"agentTurn",message:${JSON.stringify(message)}}}.`;
 }
 
 function buildLoopStatusWorkOrder(sessionKey: string): string {
