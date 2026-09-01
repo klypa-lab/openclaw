@@ -270,6 +270,8 @@ CREATE INDEX IF NOT EXISTS idx_web_push_approval_deliveries_subscription
       "web_push_subscriptions.device_id TEXT",
       "web_push_subscriptions.user_profile_id TEXT",
       "web_push_subscriptions.preferences_json TEXT",
+      "flow_runs.runner_owner_id TEXT",
+      "flow_runs.runner_lease_id TEXT",
       "skill_workshop_proposals.claim_released_time INTEGER",
     ]);
 

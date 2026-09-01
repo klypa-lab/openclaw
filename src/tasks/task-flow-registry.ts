@@ -38,6 +38,8 @@ type FlowRecordPatch = Omit<
       | "blockedTaskId"
       | "blockedSummary"
       | "controllerId"
+      | "runnerOwnerId"
+      | "runnerLeaseId"
       | "stateJson"
       | "waitJson"
       | "cancelRequestedAt"
@@ -49,6 +51,8 @@ type FlowRecordPatch = Omit<
   | "blockedTaskId"
   | "blockedSummary"
   | "controllerId"
+  | "runnerOwnerId"
+  | "runnerLeaseId"
   | "stateJson"
   | "waitJson"
   | "cancelRequestedAt"
@@ -58,6 +62,8 @@ type FlowRecordPatch = Omit<
   blockedTaskId?: string | null;
   blockedSummary?: string | null;
   controllerId?: string | null;
+  runnerOwnerId?: string | null;
+  runnerLeaseId?: string | null;
   stateJson?: JsonValue | null;
   waitJson?: JsonValue | null;
   cancelRequestedAt?: number | null;
@@ -143,6 +149,8 @@ function normalizeRestoredFlowRecord(record: TaskFlowRecord): TaskFlowRecord {
       ? { requesterOrigin: cloneStructuredValue(record.requesterOrigin)! }
       : {}),
     ...(controllerId ? { controllerId } : {}),
+    runnerOwnerId: normalizeOptionalString(record.runnerOwnerId),
+    runnerLeaseId: normalizeOptionalString(record.runnerLeaseId),
     currentStep: normalizeOptionalString(record.currentStep),
     blockedTaskId: normalizeOptionalString(record.blockedTaskId),
     blockedSummary: normalizeOptionalString(record.blockedSummary),
@@ -431,6 +439,14 @@ function applyFlowPatch(current: TaskFlowRecord, patch: FlowRecordPatch): TaskFl
     ...(patch.notifyPolicy ? { notifyPolicy: patch.notifyPolicy } : {}),
     ...(patch.goal ? { goal: patch.goal } : {}),
     controllerId,
+    runnerOwnerId:
+      patch.runnerOwnerId === undefined
+        ? current.runnerOwnerId
+        : normalizeOptionalString(patch.runnerOwnerId),
+    runnerLeaseId:
+      patch.runnerLeaseId === undefined
+        ? current.runnerLeaseId
+        : normalizeOptionalString(patch.runnerLeaseId),
     currentStep:
       patch.currentStep === undefined
         ? current.currentStep
@@ -609,8 +625,21 @@ export function resumeFlow(params: {
   status?: Extract<TaskFlowStatus, "queued" | "running">;
   currentStep?: string | null;
   stateJson?: JsonValue | null;
+  runnerLease?: { ownerId: string; leaseId: string };
   updatedAt?: number;
 }): TaskFlowUpdateResult {
+  const runnerOwnerId = params.runnerLease
+    ? normalizeOptionalString(params.runnerLease.ownerId)
+    : undefined;
+  const runnerLeaseId = params.runnerLease
+    ? normalizeOptionalString(params.runnerLease.leaseId)
+    : undefined;
+  if (params.runnerLease && (!runnerOwnerId || !runnerLeaseId)) {
+    throw new Error("TaskFlow runner lease requires non-empty ownerId and leaseId.");
+  }
+  if (params.runnerLease && params.status !== "running") {
+    throw new Error("TaskFlow runner lease requires running status.");
+  }
   return updateFlowRecordByIdExpectedRevision({
     flowId: params.flowId,
     expectedRevision: params.expectedRevision,
@@ -618,6 +647,9 @@ export function resumeFlow(params: {
       status: params.status ?? "queued",
       currentStep: params.currentStep,
       stateJson: params.stateJson,
+      // Resume transfers process ownership; omitting a lease must clear stale ownership.
+      runnerOwnerId: runnerOwnerId ?? null,
+      runnerLeaseId: runnerLeaseId ?? null,
       waitJson: null,
       blockedTaskId: null,
       blockedSummary: null,

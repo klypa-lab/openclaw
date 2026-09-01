@@ -94,6 +94,7 @@ export type BoundTaskFlowRuntime = {
     status?: Extract<ManagedTaskFlowRecord["status"], "queued" | "running">;
     currentStep?: string | null;
     stateJson?: JsonValue | null;
+    runnerLease?: { ownerId: string; leaseId: string };
     updatedAt?: number;
   }) => ManagedTaskFlowMutationResult;
   finish: (params: {
@@ -139,6 +140,10 @@ export type BoundTaskFlowRuntime = {
 };
 
 export type PluginRuntimeTaskFlow = {
+  listRunnerLeaseOrphans: (params: {
+    ownerId: string;
+    activeLeaseId: string;
+  }) => ManagedTaskFlowRecord[];
   bindSession: (params: {
     sessionKey: string;
     requesterOrigin?: TaskDeliveryState["requesterOrigin"];

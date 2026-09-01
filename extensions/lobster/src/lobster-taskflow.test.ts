@@ -2,7 +2,11 @@
 import { createRuntimeTaskFlow } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { describe, expect, it, vi } from "vitest";
 import type { LobsterRunner } from "./lobster-runner.js";
-import { resumeManagedLobsterFlow, runManagedLobsterFlow } from "./lobster-taskflow.js";
+import {
+  LOBSTER_RUNNER_LEASE,
+  resumeManagedLobsterFlow,
+  runManagedLobsterFlow,
+} from "./lobster-taskflow.js";
 import { createFakeTaskFlow } from "./taskflow-test-helpers.js";
 
 function expectManagedFlowFailure(
@@ -85,6 +89,7 @@ describe("runManagedLobsterFlow", () => {
       expectedRevision: 1,
       status: "running",
       currentStep: "run_lobster",
+      runnerLease: LOBSTER_RUNNER_LEASE,
     });
     expect(taskFlow.finish).toHaveBeenCalledWith({
       flowId: "flow-1",
@@ -215,6 +220,7 @@ describe("resumeManagedLobsterFlow", () => {
       expectedRevision: 4,
       status: "running",
       currentStep: "resume_lobster",
+      runnerLease: LOBSTER_RUNNER_LEASE,
     });
     expect(taskFlow.finish).toHaveBeenCalledWith({
       flowId: "flow-1",

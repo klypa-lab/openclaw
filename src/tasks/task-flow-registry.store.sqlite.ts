@@ -18,6 +18,7 @@ import {
 } from "../infra/kysely-sync.js";
 import { normalizeSqliteNumber } from "../infra/sqlite-number.js";
 import { withExistingOpenClawStateDatabaseReadOnly } from "../state/openclaw-state-db-readonly.js";
+import { ensureTaskFlowRunnerLeaseSchema } from "../state/openclaw-state-db-schema-additive.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
   closeOpenClawStateDatabase,
@@ -39,7 +40,9 @@ import { parseTaskNotifyPolicy } from "./task-registry.types.js";
 type FlowRunsTable = OpenClawStateKyselyDatabase["flow_runs"];
 type FlowRegistryStoreDatabase = Pick<OpenClawStateKyselyDatabase, "flow_runs">;
 
-type FlowRegistryRow = Selectable<FlowRunsTable> & {
+type FlowRegistryRow = Omit<Selectable<FlowRunsTable>, "runner_owner_id" | "runner_lease_id"> & {
+  runner_owner_id?: string | null;
+  runner_lease_id?: string | null;
   sync_mode: string | null;
   status: string;
   notify_policy: string;
@@ -104,6 +107,8 @@ function rowToFlowRecord(row: FlowRegistryRow): TaskFlowRecord {
     ownerKey: row.owner_key,
     ...(requesterOrigin ? { requesterOrigin } : {}),
     ...(row.controller_id ? { controllerId: row.controller_id } : {}),
+    ...(row.runner_owner_id ? { runnerOwnerId: row.runner_owner_id } : {}),
+    ...(row.runner_lease_id ? { runnerLeaseId: row.runner_lease_id } : {}),
     revision: normalizeSqliteNumber(row.revision) ?? 0,
     status: parseTaskFlowStatus(row.status),
     notifyPolicy: parseTaskNotifyPolicy(row.notify_policy),
@@ -128,6 +133,8 @@ function bindFlowRecord(record: TaskFlowRecord): Insertable<FlowRunsTable> {
     owner_key: record.ownerKey,
     requester_origin_json: serializeJson(record.requesterOrigin),
     controller_id: record.controllerId ?? null,
+    runner_owner_id: record.runnerOwnerId ?? null,
+    runner_lease_id: record.runnerLeaseId ?? null,
     revision: record.revision,
     status: record.status,
     notify_policy: record.notifyPolicy,
@@ -166,8 +173,11 @@ function pruneFlowsNotInSnapshot(params: { db: DatabaseSync; ids: readonly strin
   params.db.exec(`DELETE FROM ${tempTableName}`);
 }
 
-function selectFlowRows(db: DatabaseSync): FlowRegistryRow[] {
-  const query = getFlowRegistryKysely(db)
+function selectFlowRows(
+  db: DatabaseSync,
+  options: { includeRunnerLease: boolean },
+): FlowRegistryRow[] {
+  const baseQuery = getFlowRegistryKysely(db)
     .selectFrom("flow_runs")
     .select([
       "flow_id",
@@ -189,7 +199,12 @@ function selectFlowRows(db: DatabaseSync): FlowRegistryRow[] {
       "created_at",
       "updated_at",
       "ended_at",
-    ])
+    ]);
+  const query = (
+    options.includeRunnerLease
+      ? baseQuery.select(["runner_owner_id", "runner_lease_id"])
+      : baseQuery
+  )
     .orderBy("created_at", "asc")
     .orderBy("flow_id", "asc");
   return executeSqliteQuerySync(db, query).rows;
@@ -207,6 +222,8 @@ function upsertFlowRow(db: DatabaseSync, row: Insertable<FlowRunsTable>): void {
           owner_key: (eb) => eb.ref("excluded.owner_key"),
           requester_origin_json: (eb) => eb.ref("excluded.requester_origin_json"),
           controller_id: (eb) => eb.ref("excluded.controller_id"),
+          runner_owner_id: (eb) => eb.ref("excluded.runner_owner_id"),
+          runner_lease_id: (eb) => eb.ref("excluded.runner_lease_id"),
           revision: (eb) => eb.ref("excluded.revision"),
           status: (eb) => eb.ref("excluded.status"),
           notify_policy: (eb) => eb.ref("excluded.notify_policy"),
@@ -234,6 +251,7 @@ function openFlowRegistryDatabase(): FlowRegistryDatabase {
   if (cachedDatabase && !cachedDatabase.db.isOpen) {
     cachedDatabase = null;
   }
+  ensureTaskFlowRunnerLeaseSchema(database.db);
   cachedDatabase = {
     db: database.db,
     path: pathname,
@@ -250,7 +268,7 @@ function withWriteTransaction(write: (database: FlowRegistryDatabase) => void) {
 
 export function loadTaskFlowRegistryStateFromSqlite(): TaskFlowRegistryStoreSnapshot {
   const { db } = openFlowRegistryDatabase();
-  const rows = selectFlowRows(db);
+  const rows = selectFlowRows(db, { includeRunnerLease: true });
   return {
     flows: new Map(rows.map((row) => [row.flow_id, rowToFlowRecord(row)])),
   };
@@ -260,7 +278,8 @@ export function loadTaskFlowRegistryStateFromSqlite(): TaskFlowRegistryStoreSnap
 export function loadTaskFlowRegistryStateFromSqliteReadOnly(): TaskFlowRegistryStoreSnapshot {
   return (
     withExistingOpenClawStateDatabaseReadOnly(({ db }) => {
-      const rows = selectFlowRows(db);
+      // Read-only inspection must not mutate an older same-version database.
+      const rows = selectFlowRows(db, { includeRunnerLease: false });
       return {
         flows: new Map(rows.map((row) => [row.flow_id, rowToFlowRecord(row)])),
       };

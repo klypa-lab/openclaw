@@ -15,6 +15,7 @@ import {
   createManagedTaskFlow,
   failFlow,
   finishFlow,
+  listTaskFlowRecords,
   type TaskFlowUpdateResult,
   requestFlowCancel,
   resumeFlow,
@@ -181,6 +182,7 @@ function createBoundTaskFlowRuntime(params: {
             status: input.status,
             currentStep: input.currentStep,
             stateJson: input.stateJson,
+            runnerLease: input.runnerLease,
             updatedAt: input.updatedAt,
           }),
       }),
@@ -285,6 +287,26 @@ function createBoundTaskFlowRuntime(params: {
 
 export function createRuntimeTaskFlow(): PluginRuntimeTaskFlow {
   return {
+    listRunnerLeaseOrphans: (params) => {
+      const ownerId = assertSessionKey(
+        params.ownerId,
+        "TaskFlow runner orphan query requires an ownerId.",
+      );
+      const activeLeaseId = assertSessionKey(
+        params.activeLeaseId,
+        "TaskFlow runner orphan query requires an activeLeaseId.",
+      );
+      return listTaskFlowRecords().flatMap((flow) => {
+        const managed = asManagedTaskFlowRecord(flow);
+        return managed &&
+          managed.status === "running" &&
+          managed.runnerOwnerId === ownerId &&
+          managed.runnerLeaseId &&
+          managed.runnerLeaseId !== activeLeaseId
+          ? [managed]
+          : [];
+      });
+    },
     bindSession: (params) =>
       createBoundTaskFlowRuntime({
         sessionKey: params.sessionKey,

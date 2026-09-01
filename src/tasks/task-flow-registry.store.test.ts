@@ -7,13 +7,17 @@ import { createExecutionIdentityAdmissionToken } from "../audit/execution-identi
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
-import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
+import {
+  closeOpenClawStateDatabase,
+  openOpenClawStateDatabase,
+} from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import {
   createManagedTaskFlow as createManagedTaskFlowOrNull,
   getTaskFlowById,
   requestFlowCancel,
+  resumeFlow,
   setFlowWaiting,
 } from "./task-flow-registry.js";
 import {
@@ -271,6 +275,56 @@ describe("task-flow-registry store runtime", () => {
       expect(restored?.stateJson).toEqual({ phase: "ask_user" });
       expect(restored?.waitJson).toEqual({ kind: "external_event", topic: "forum" });
       expect(restored?.cancelRequestedAt).toBe(444);
+    });
+  });
+
+  it("lazily restores and round-trips runner leases without a schema version bump", async () => {
+    await withFlowRegistryTempDir(async () => {
+      const database = openOpenClawStateDatabase();
+      const schemaVersion = (
+        database.db.prepare("PRAGMA user_version").get() as { user_version: number }
+      ).user_version;
+      database.db.exec("ALTER TABLE flow_runs DROP COLUMN runner_owner_id");
+      database.db.exec("ALTER TABLE flow_runs DROP COLUMN runner_lease_id");
+      closeOpenClawStateDatabase();
+
+      const created = createManagedTaskFlow({
+        ownerKey: "agent:main:main",
+        controllerId: "tests/runner-lease",
+        goal: "Persist runner lease",
+      });
+      const resumed = resumeFlow({
+        flowId: created.flowId,
+        expectedRevision: created.revision,
+        status: "running",
+        runnerLease: { ownerId: "lobster", leaseId: "lease-before-restart" },
+      });
+      expect(resumed.applied).toBe(true);
+
+      resetTaskFlowRegistryForTests({ persist: false });
+
+      expect(getTaskFlowById(created.flowId)).toMatchObject({
+        runnerOwnerId: "lobster",
+        runnerLeaseId: "lease-before-restart",
+      });
+      const reopened = openOpenClawStateDatabase();
+      expect(
+        (reopened.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+      ).toBe(schemaVersion);
+      const columns = reopened.db.prepare("PRAGMA table_info(flow_runs)").all() as Array<{
+        name: string;
+        type: string;
+        notnull: number;
+        dflt_value: unknown;
+      }>;
+      expect(
+        columns
+          .filter(({ name }) => name === "runner_owner_id" || name === "runner_lease_id")
+          .map(({ name, type, notnull, dflt_value }) => ({ name, type, notnull, dflt_value })),
+      ).toEqual([
+        { name: "runner_owner_id", type: "TEXT", notnull: 0, dflt_value: null },
+        { name: "runner_lease_id", type: "TEXT", notnull: 0, dflt_value: null },
+      ]);
     });
   });
 

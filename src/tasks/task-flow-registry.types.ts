@@ -50,6 +50,8 @@ export type TaskFlowRecord = {
   ownerKey: string;
   requesterOrigin?: DeliveryContext;
   controllerId?: string;
+  runnerOwnerId?: string;
+  runnerLeaseId?: string;
   revision: number;
   status: TaskFlowStatus;
   notifyPolicy: TaskNotifyPolicy;

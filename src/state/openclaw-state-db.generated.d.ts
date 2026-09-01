@@ -611,6 +611,8 @@ export interface FlowRuns {
   owner_key: string;
   requester_origin_json: string | null;
   revision: Generated<number>;
+  runner_lease_id: string | null;
+  runner_owner_id: string | null;
   shape: string | null;
   state_json: string | null;
   status: string;

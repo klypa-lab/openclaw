@@ -372,6 +372,7 @@ describe("plugin runtime command execution", () => {
         expectFunctionKeys(runtime.tasks.managedFlows as Record<string, unknown>, [
           "bindSession",
           "fromToolContext",
+          "listRunnerLeaseOrphans",
         ]);
       },
     },

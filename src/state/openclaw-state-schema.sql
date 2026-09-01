@@ -1615,6 +1615,8 @@ CREATE TABLE IF NOT EXISTS flow_runs (
   owner_key TEXT NOT NULL,
   requester_origin_json TEXT,
   controller_id TEXT,
+  runner_owner_id TEXT,
+  runner_lease_id TEXT,
   revision INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   notify_policy TEXT NOT NULL,

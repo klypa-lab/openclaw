@@ -146,6 +146,12 @@ export function ensureDevicePairSetupBootstrapSchema(database: DatabaseSync): vo
   ensureColumn(database, "device_bootstrap_tokens", "setup_id TEXT");
 }
 
+/** Lazily records process-local ownership when TaskFlow first starts managed work. */
+export function ensureTaskFlowRunnerLeaseSchema(database: DatabaseSync): void {
+  ensureColumn(database, "flow_runs", "runner_owner_id TEXT");
+  ensureColumn(database, "flow_runs", "runner_lease_id TEXT");
+}
+
 /** Installs environment-owned node binding columns at first cloud enrollment use. */
 export function ensureWorkerEnvironmentNodeEnrollmentSchema(database: DatabaseSync): void {
   ensureDevicePairSetupCompletionSchema(database);

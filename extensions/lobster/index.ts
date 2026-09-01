@@ -1,6 +1,7 @@
 // Lobster plugin entrypoint registers its OpenClaw integration.
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import type { AnyAgentTool, OpenClawPluginApi, OpenClawPluginToolFactory } from "./runtime-api.js";
+import { recoverOrphanedLobsterFlows } from "./src/lobster-runner-recovery.js";
 import { createLobsterTool } from "./src/lobster-tool.js";
 
 export default definePluginEntry({
@@ -8,6 +9,12 @@ export default definePluginEntry({
   name: "Lobster",
   description: "Optional local shell helper tools",
   register(api: OpenClawPluginApi) {
+    api.on("gateway_start", () => {
+      const recovered = recoverOrphanedLobsterFlows(api);
+      if (recovered > 0) {
+        api.logger.warn(`Marked ${recovered} interrupted Lobster workflow(s) as failed.`);
+      }
+    });
     api.registerTool(
       ((ctx) => {
         if (ctx.sandboxed) {

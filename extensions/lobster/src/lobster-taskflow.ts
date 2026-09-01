@@ -1,4 +1,5 @@
 // Lobster plugin module implements lobster taskflow behavior.
+import crypto from "node:crypto";
 import type { OpenClawPluginApi } from "../runtime-api.js";
 import type { LobsterEnvelope, LobsterRunner, LobsterRunnerParams } from "./lobster-runner.js";
 
@@ -17,6 +18,11 @@ export type BoundTaskFlow = ReturnType<
 >;
 
 type FlowRecord = NonNullable<ReturnType<BoundTaskFlow["tryCreateManaged"]>>;
+
+export const LOBSTER_RUNNER_LEASE = Object.freeze({
+  ownerId: "lobster",
+  leaseId: crypto.randomUUID(),
+});
 type MutationResult =
   | ReturnType<BoundTaskFlow["setWaiting"]>
   | Awaited<ReturnType<BoundTaskFlow["cancel"]>>;
@@ -202,6 +208,7 @@ export function launchManagedLobsterFlow(
     expectedRevision: flow.revision,
     status: "running",
     currentStep: params.currentStep ?? "run_lobster",
+    runnerLease: LOBSTER_RUNNER_LEASE,
   });
   if (!started.applied) {
     return {
@@ -230,6 +237,7 @@ export async function resumeManagedLobsterFlow(
     expectedRevision: params.expectedRevision,
     status: "running",
     currentStep: params.currentStep ?? "resume_lobster",
+    runnerLease: LOBSTER_RUNNER_LEASE,
   });
 
   if (!resumed.applied) {

@@ -83,6 +83,54 @@ describe("runtime TaskFlow", () => {
     expect(created.requesterOrigin?.threadId).toBe("thread:456");
   });
 
+  it("lists only stale running leases for the exact runner owner", () => {
+    const runtime = createRuntimeTaskFlow();
+    const taskFlow = runtime.bindSession({ sessionKey: "agent:main:main" });
+    const createRunningFlow = (goal: string, ownerId: string, leaseId: string) => {
+      const created = requireCreatedFlow(
+        taskFlow.createManaged({ controllerId: "tests/runner-lease", goal }),
+      );
+      const resumed = taskFlow.resume({
+        flowId: created.flowId,
+        expectedRevision: created.revision,
+        status: "running",
+        runnerLease: { ownerId, leaseId },
+      });
+      if (!resumed.applied) {
+        throw new Error("expected runner lease to apply");
+      }
+      return resumed.flow;
+    };
+
+    const stale = createRunningFlow("Stale Lobster flow", "lobster", "lease-before-restart");
+    createRunningFlow("Current Lobster flow", "lobster", "lease-current");
+    createRunningFlow("Other runner flow", "other-plugin", "lease-before-restart");
+    const waiting = createRunningFlow("Waiting Lobster flow", "lobster", "lease-before-restart");
+    const waitingResult = taskFlow.setWaiting({
+      flowId: waiting.flowId,
+      expectedRevision: waiting.revision,
+    });
+    expect(waitingResult.applied).toBe(true);
+
+    expect(
+      runtime
+        .listRunnerLeaseOrphans({ ownerId: "lobster", activeLeaseId: "lease-current" })
+        .map((flow) => flow.flowId),
+    ).toEqual([stale.flowId]);
+
+    const queued = requireCreatedFlow(
+      taskFlow.createManaged({ controllerId: "tests/runner-lease", goal: "Queued flow" }),
+    );
+    expect(() =>
+      taskFlow.resume({
+        flowId: queued.flowId,
+        expectedRevision: queued.revision,
+        runnerLease: { ownerId: "lobster", leaseId: "lease-current" },
+      }),
+    ).toThrow("TaskFlow runner lease requires running status.");
+    expect(taskFlow.get(queued.flowId)).toMatchObject({ status: "queued", revision: 0 });
+  });
+
   it("rejects tool contexts without a bound session key", () => {
     const runtime = createRuntimeTaskFlow();
     expect(() =>

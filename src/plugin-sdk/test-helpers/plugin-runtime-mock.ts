@@ -199,6 +199,9 @@ export function createPluginRuntimeMock(overrides: DeepPartial<PluginRuntime> = 
       meta: { durationMs: 0 },
     });
   const taskFlow = {
+    listRunnerLeaseOrphans: vi.fn<PluginRuntime["tasks"]["managedFlows"]["listRunnerLeaseOrphans"]>(
+      () => [],
+    ),
     bindSession:
       vi.fn<PluginRuntime["tasks"]["managedFlows"]["bindSession"]>(createTaskFlowSessionMock),
     fromToolContext:
