@@ -306,6 +306,7 @@ async function dispatchInbound(ctx, account, message) {
     CommandBody: message.body,
     From: target,
     To: target,
+    SenderId: message.author_id,
     SessionKey: route.sessionKey,
     AccountId: route.accountId ?? account.accountId,
     ChatType: "group",

@@ -588,6 +588,15 @@ export const mainLanes: DockerE2eLane[] = [
     "OPENCLAW_SKIP_DOCKER_BUILD=1 pnpm test:docker:cron-mcp-cleanup",
     { resources: ["npm"], stateScenario: "empty", weight: 3 },
   ),
+  serviceLane(
+    "lobster-loop-taskflow",
+    "OPENCLAW_SKIP_DOCKER_BUILD=1 pnpm test:docker:lobster-loop-taskflow",
+    {
+      prepublishPluginPackages: ["@openclaw/lobster"],
+      stateScenario: "empty",
+      weight: 3,
+    },
+  ),
   ...createPackageUpdateMaintenanceLanes(),
   npmLane("update-migration", updateMigrationCommand, {
     stateScenario: "upgrade-survivor",
