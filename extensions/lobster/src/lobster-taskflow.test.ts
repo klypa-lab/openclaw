@@ -77,11 +77,18 @@ describe("runManagedLobsterFlow", () => {
     expect(taskFlow.createManaged).toHaveBeenCalledWith({
       controllerId: "tests/lobster",
       goal: "Run Lobster workflow",
+      status: "queued",
+      currentStep: "run_lobster",
+    });
+    expect(taskFlow.resume).toHaveBeenCalledWith({
+      flowId: "flow-1",
+      expectedRevision: 1,
+      status: "running",
       currentStep: "run_lobster",
     });
     expect(taskFlow.finish).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 1,
+      expectedRevision: 2,
     });
   });
 
@@ -130,7 +137,7 @@ describe("runManagedLobsterFlow", () => {
     expect(result.ok).toBe(true);
     expect(taskFlow.setWaiting).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 1,
+      expectedRevision: 2,
       currentStep: "await_lobster_approval",
       waitJson: {
         kind: "lobster_approval",
@@ -169,7 +176,7 @@ describe("runManagedLobsterFlow", () => {
     expect(result.error.message).toBe("boom");
     expect(taskFlow.fail).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 1,
+      expectedRevision: 2,
     });
   });
 
@@ -185,7 +192,7 @@ describe("runManagedLobsterFlow", () => {
     expect(result.error.message).toBe("crashed");
     expect(taskFlow.fail).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 1,
+      expectedRevision: 2,
     });
   });
 });

@@ -20,8 +20,8 @@ import {
   type BoundTaskFlow,
   type JsonLike,
   type ManagedLobsterFlowResult,
+  launchManagedLobsterFlow,
   resumeManagedLobsterFlow,
-  runManagedLobsterFlow,
 } from "./lobster-taskflow.js";
 
 type LobsterToolOptions = {
@@ -265,19 +265,26 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
       const taskFlow = options?.taskFlow;
       const flowParams = parseManagedFlowParams(action, params, runnerParams);
       if (flowParams?.action === "run") {
-        return resolveManagedFlowToolResult(
-          await runManagedLobsterFlow({
-            taskFlow: requireTaskFlowRuntime(taskFlow, "run"),
-            config: api.config,
-            runner,
-            runnerParams,
-            controllerId: flowParams.controllerId,
-            goal: flowParams.goal,
-            ...(flowParams.stateJson !== undefined ? { stateJson: flowParams.stateJson } : {}),
-            ...(flowParams.currentStep ? { currentStep: flowParams.currentStep } : {}),
-            ...(flowParams.waitingStep ? { waitingStep: flowParams.waitingStep } : {}),
-          }),
-        );
+        const launched = launchManagedLobsterFlow({
+          taskFlow: requireTaskFlowRuntime(taskFlow, "run"),
+          config: api.config,
+          runner,
+          runnerParams,
+          controllerId: flowParams.controllerId,
+          goal: flowParams.goal,
+          ...(flowParams.stateJson !== undefined ? { stateJson: flowParams.stateJson } : {}),
+          ...(flowParams.currentStep ? { currentStep: flowParams.currentStep } : {}),
+          ...(flowParams.waitingStep ? { waitingStep: flowParams.waitingStep } : {}),
+        });
+        if (!launched.ok) {
+          throw launched.error;
+        }
+        void launched.completion;
+        return jsonResult({
+          outcome: "started",
+          flow: launched.flow,
+          mutation: launched.mutation,
+        });
       }
       if (flowParams?.action === "resume") {
         return resolveManagedFlowToolResult(

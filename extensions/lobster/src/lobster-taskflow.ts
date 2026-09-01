@@ -69,6 +69,15 @@ export type ManagedLobsterFlowResult =
       error: Error;
     };
 
+export type ManagedLobsterFlowLaunchResult =
+  | {
+      ok: true;
+      flow: FlowRecord;
+      mutation: Extract<ReturnType<BoundTaskFlow["resume"]>, { applied: true }>;
+      completion: Promise<ManagedLobsterFlowResult>;
+    }
+  | Extract<ManagedLobsterFlowResult, { ok: false }>;
+
 function toJsonLike(value: unknown, seen = new WeakSet<object>()): JsonLike {
   if (value === null) {
     return null;
@@ -172,12 +181,13 @@ async function executeManagedLobsterFlow(
   }
 }
 
-export async function runManagedLobsterFlow(
+export function launchManagedLobsterFlow(
   params: RunManagedLobsterFlowParams,
-): Promise<ManagedLobsterFlowResult> {
+): ManagedLobsterFlowLaunchResult {
   const createFlowParams = {
     controllerId: params.controllerId,
     goal: params.goal,
+    status: "queued" as const,
     currentStep: params.currentStep ?? "run_lobster",
     ...(params.stateJson !== undefined ? { stateJson: params.stateJson } : {}),
   };
@@ -187,7 +197,29 @@ export async function runManagedLobsterFlow(
   if (!flow) {
     return { ok: false, error: new Error("TaskFlow persistence failed.") };
   }
-  return await executeManagedLobsterFlow(params, flow);
+  const started = params.taskFlow.resume({
+    flowId: flow.flowId,
+    expectedRevision: flow.revision,
+    status: "running",
+    currentStep: params.currentStep ?? "run_lobster",
+  });
+  if (!started.applied) {
+    return {
+      ok: false,
+      flow,
+      mutation: started,
+      error: new Error(`TaskFlow start failed: ${started.code}`),
+    };
+  }
+  const completion = executeManagedLobsterFlow(params, started.flow);
+  return { ok: true, flow: started.flow, mutation: started, completion };
+}
+
+export async function runManagedLobsterFlow(
+  params: RunManagedLobsterFlowParams,
+): Promise<ManagedLobsterFlowResult> {
+  const launched = launchManagedLobsterFlow(params);
+  return launched.ok ? await launched.completion : launched;
 }
 
 export async function resumeManagedLobsterFlow(

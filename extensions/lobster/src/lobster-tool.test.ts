@@ -418,12 +418,19 @@ describe("lobster plugin tool", () => {
     expect(taskFlow.createManaged).toHaveBeenCalledWith({
       controllerId: "tests/lobster",
       goal: "Run Lobster workflow",
+      status: "queued",
       currentStep: "run_lobster",
       stateJson: { lane: "email" },
     });
-    expect(taskFlow.setWaiting).toHaveBeenCalledWith({
+    expect(taskFlow.resume).toHaveBeenCalledWith({
       flowId: "flow-1",
       expectedRevision: 1,
+      status: "running",
+      currentStep: "run_lobster",
+    });
+    expect(taskFlow.setWaiting).toHaveBeenCalledWith({
+      flowId: "flow-1",
+      expectedRevision: 2,
       currentStep: "await_review",
       waitJson: {
         kind: "lobster_approval",
@@ -434,12 +441,59 @@ describe("lobster plugin tool", () => {
       },
     });
     const details = requireRecord(res.details, "managed run lobster tool details");
-    expect(details.ok).toBe(true);
-    expect(details.status).toBe("needs_approval");
+    expect(details.outcome).toBe("started");
     const flow = requireRecord(details.flow, "managed run flow details");
     expect(flow.flowId).toBe("flow-1");
+    expect(flow.status).toBe("running");
     const mutation = requireRecord(details.mutation, "managed run mutation details");
     expect(mutation.applied).toBe(true);
+  });
+
+  it("returns a managed start receipt before the runner completes", async () => {
+    let resolveRun:
+      | ((value: { ok: true; status: "ok"; output: never[]; requiresApproval: null }) => void)
+      | undefined;
+    const runner = {
+      run: vi.fn(
+        () =>
+          new Promise<{
+            ok: true;
+            status: "ok";
+            output: never[];
+            requiresApproval: null;
+          }>((resolve) => {
+            resolveRun = resolve;
+          }),
+      ),
+    };
+    const taskFlow = createFakeTaskFlow();
+    const tool = createLobsterTool(fakeApi(), { runner, taskFlow });
+    let settled = false;
+    const execution = tool
+      .execute("call-managed-detached-run", {
+        action: "run",
+        pipeline: "noop",
+        flowControllerId: "tests/lobster",
+        flowGoal: "Run Lobster workflow",
+      })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    const settledBeforeCompletion = settled;
+    resolveRun?.({ ok: true, status: "ok", output: [], requiresApproval: null });
+    const result = await execution;
+    await vi.waitFor(() => expect(taskFlow.finish).toHaveBeenCalledOnce());
+
+    expect(settledBeforeCompletion).toBe(true);
+    const details = requireRecord(result.details, "managed detached run details");
+    expect(details.outcome).toBe("started");
+    expect(requireRecord(details.flow, "managed detached flow").status).toBe("running");
   });
 
   it("preserves explicit empty flow state in managed TaskFlow run mode", async () => {
@@ -465,6 +519,7 @@ describe("lobster plugin tool", () => {
     expect(taskFlow.createManaged).toHaveBeenCalledWith({
       controllerId: "tests/lobster",
       goal: "Run Lobster workflow",
+      status: "queued",
       currentStep: "run_lobster",
       stateJson: {},
     });
