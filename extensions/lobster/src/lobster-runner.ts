@@ -33,6 +33,7 @@ export type LobsterRunnerParams = {
   cwd: string;
   timeoutMs: number;
   maxStdoutBytes: number;
+  signal?: AbortSignal;
 };
 
 export type LobsterRunner = {
@@ -192,29 +193,41 @@ function createEmbeddedToolContext(
 
 async function withTimeout<T>(
   timeoutMs: number,
-  fn: (signal?: AbortSignal) => Promise<T>,
+  externalSignal: AbortSignal | undefined,
+  fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const timeout = Math.max(200, timeoutMs);
-  const controller = new AbortController();
-  return await new Promise<T>((resolve, reject) => {
-    const onTimeout = () => {
-      const error = new Error("lobster runtime timed out");
-      controller.abort(error);
-      reject(error);
-    };
-
-    const timer = setTimeout(onTimeout, timeout);
-    void fn(controller.signal).then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
+  const timeoutController = new AbortController();
+  const signal = externalSignal
+    ? AbortSignal.any([externalSignal, timeoutController.signal])
+    : timeoutController.signal;
+  let onAbort = () => {};
+  const timer = setTimeout(
+    () => timeoutController.abort(new Error("lobster runtime timed out")),
+    timeout,
+  );
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      onAbort = () =>
+        reject(
+          toLintErrorObject(
+            signal.reason ?? new DOMException("The operation was aborted", "AbortError"),
+            "Non-Error abort reason",
+          ),
+        );
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      void fn(signal).then(resolve, (error: unknown) => {
         reject(toLintErrorObject(error, "Non-Error rejection"));
-      },
-    );
-  });
+      });
+    });
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 async function loadEmbeddedToolRuntimeFromPackage(): Promise<EmbeddedToolRuntime> {
@@ -232,9 +245,10 @@ export function createEmbeddedLobsterRunner(options?: {
   let runtimePromise: Promise<EmbeddedToolRuntime> | undefined;
   return {
     async run(params) {
-      runtimePromise ??= loadRuntime();
-      const runtime = await runtimePromise;
-      return await withTimeout(params.timeoutMs, async (signal) => {
+      return await withTimeout(params.timeoutMs, params.signal, async (signal) => {
+        runtimePromise ??= loadRuntime();
+        const runtime = await runtimePromise;
+        signal.throwIfAborted();
         const ctx = createEmbeddedToolContext(params, signal);
         let envelope: EmbeddedToolEnvelope;
 

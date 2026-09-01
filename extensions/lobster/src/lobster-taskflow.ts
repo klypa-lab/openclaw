@@ -145,6 +145,43 @@ function buildApprovalWaitState(envelope: Extract<LobsterEnvelope, { ok: true }>
   } satisfies LobsterApprovalWaitState;
 }
 
+async function runWithTaskFlowCancellation(params: {
+  taskFlow: BoundTaskFlow;
+  flowId: string;
+  runner: LobsterRunner;
+  runnerParams: LobsterRunnerParams;
+}): Promise<LobsterEnvelope> {
+  const controller = new AbortController();
+  const checkCancellation = () => {
+    const flow = params.taskFlow.get(params.flowId);
+    if (
+      (flow?.status === "cancelled" || flow?.cancelRequestedAt != null) &&
+      !controller.signal.aborted
+    ) {
+      controller.abort(new Error("TaskFlow cancellation requested"));
+    }
+  };
+  // The TaskFlow record is authoritative. Check before admission, then keep the
+  // embedded runtime tied to cancellation for the full execution lifetime.
+  checkCancellation();
+  if (controller.signal.aborted) {
+    throw controller.signal.reason;
+  }
+  const timer = setInterval(checkCancellation, 100);
+  timer.unref?.();
+  try {
+    const signal = params.runnerParams.signal
+      ? AbortSignal.any([params.runnerParams.signal, controller.signal])
+      : controller.signal;
+    const envelope = await params.runner.run({ ...params.runnerParams, signal });
+    checkCancellation();
+    controller.signal.throwIfAborted();
+    return envelope;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 async function executeManagedLobsterFlow(
   params: Pick<
     RunManagedLobsterFlowParams,
@@ -153,7 +190,12 @@ async function executeManagedLobsterFlow(
   flow: FlowRecord,
 ): Promise<ManagedLobsterFlowResult> {
   try {
-    const envelope = await params.runner.run(params.runnerParams);
+    const envelope = await runWithTaskFlowCancellation({
+      taskFlow: params.taskFlow,
+      flowId: flow.flowId,
+      runner: params.runner,
+      runnerParams: params.runnerParams,
+    });
     if (envelope.ok && envelope.status === "cancelled") {
       try {
         const mutation = await params.taskFlow.cancel({ flowId: flow.flowId, cfg: params.config });
@@ -194,6 +236,12 @@ async function executeManagedLobsterFlow(
     return { ok: true, envelope, flow, mutation };
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
+    const persisted = params.taskFlow.get(flow.flowId);
+    // Cancellation is already terminal state; a runner rejection must not
+    // replace it with failure after the abort reaches embedded Lobster work.
+    if (persisted?.status === "cancelled" || persisted?.cancelRequestedAt != null) {
+      return { ok: false, flow, error: err };
+    }
     try {
       const mutation = params.taskFlow.fail({
         flowId: flow.flowId,

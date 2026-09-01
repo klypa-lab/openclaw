@@ -594,6 +594,7 @@ describe("lobster plugin tool", () => {
       cwd: process.cwd(),
       timeoutMs: 20_000,
       maxStdoutBytes: 512_000,
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -681,6 +682,7 @@ describe("lobster plugin tool", () => {
       cwd: process.cwd(),
       timeoutMs: 20_000,
       maxStdoutBytes: 512_000,
+      signal: expect.any(AbortSignal),
     });
     const details = requireRecord(res.details, "managed resume lobster tool details");
     expect(details.ok).toBe(true);
@@ -724,6 +726,7 @@ describe("lobster plugin tool", () => {
       cwd: process.cwd(),
       timeoutMs: 20_000,
       maxStdoutBytes: 512_000,
+      signal: expect.any(AbortSignal),
     });
   });
 

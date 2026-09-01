@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-export const SESSION_KEY = "agent:main:clickclack:channel:channel:ch_general";
-export const LOOP_PROMPT =
+const SESSION_KEY = "agent:main:clickclack:channel:channel:ch_general";
+const LOOP_PROMPT =
   "Run the Lobster commands.list pipeline as a managed TaskFlow and preserve the loop trace key in flow state.";
 export const FLOW_CONTROLLER_ID = "lobster/loop";
 export const FLOW_GOAL = "Prove packaged /loop to Lobster to TaskFlow execution";
@@ -10,7 +10,7 @@ const conversationTag = createHash("sha256").update(SESSION_KEY).digest("hex").s
 const promptHash = createHash("sha256").update(LOOP_PROMPT).digest("hex");
 
 export const LOOP_DECLARATION_KEY = `loop:v1:${conversationTag}:${promptHash}`;
-export const LOOP_SHORT_NAME = LOOP_PROMPT.slice(0, 40).trimEnd();
+const LOOP_SHORT_NAME = LOOP_PROMPT.slice(0, 40).trimEnd();
 export const LOOP_JOB_NAME = `loop[${conversationTag}] ${LOOP_SHORT_NAME}`;
 export const LOOP_PAYLOAD_MESSAGE = [
   `[loop ${LOOP_SHORT_NAME}] ${LOOP_PROMPT}`,

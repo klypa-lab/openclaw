@@ -635,4 +635,88 @@ describe("createEmbeddedLobsterRunner", () => {
       }),
     ).rejects.toThrow(/timed out|aborted/);
   });
+
+  it("returns promptly when TaskFlow aborts embedded work", async () => {
+    const runtime = {
+      runToolRequest: vi.fn(
+        async ({ ctx }: { ctx?: { signal?: AbortSignal } }) =>
+          await new Promise((_resolve, reject) => {
+            const onAbort = () =>
+              reject(
+                toLintErrorObject(
+                  ctx?.signal?.reason ?? new Error("Lobster workflow cancelled"),
+                  "Non-Error rejection",
+                ),
+              );
+            ctx?.signal?.addEventListener("abort", onAbort, { once: true });
+          }),
+      ),
+      resumeToolRequest: vi.fn(),
+    };
+    const controller = new AbortController();
+    const runner = createEmbeddedLobsterRunner({
+      loadRuntime: vi.fn().mockResolvedValue(runtime),
+    });
+
+    const result = runner.run({
+      action: "run",
+      pipeline: "exec --json=true echo hi",
+      cwd: process.cwd(),
+      timeoutMs: 120_000,
+      maxStdoutBytes: 4096,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(runtime.runToolRequest).toHaveBeenCalledOnce());
+    controller.abort(new Error("TaskFlow cancellation requested"));
+
+    await expect(result).rejects.toThrow("TaskFlow cancellation requested");
+  });
+
+  it("returns before a pending runtime load finishes and does not start late work", async () => {
+    const runtime = {
+      runToolRequest: vi.fn(),
+      resumeToolRequest: vi.fn(),
+    };
+    let resolveRuntime: ((value: typeof runtime) => void) | undefined;
+    const loadRuntime = vi.fn(
+      () =>
+        new Promise<typeof runtime>((resolve) => {
+          resolveRuntime = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const runner = createEmbeddedLobsterRunner({ loadRuntime });
+    let settled = false;
+    const outcome = runner
+      .run({
+        action: "run",
+        pipeline: "exec --json=true echo hi",
+        cwd: process.cwd(),
+        timeoutMs: 120_000,
+        maxStdoutBytes: 4096,
+        signal: controller.signal,
+      })
+      .then(
+        () => {
+          settled = true;
+          return "resolved";
+        },
+        (error: unknown) => {
+          settled = true;
+          return toLintErrorObject(error, "Non-Error rejection").message;
+        },
+      );
+    await vi.waitFor(() => expect(loadRuntime).toHaveBeenCalledOnce());
+
+    controller.abort(new Error("TaskFlow cancellation requested"));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    const settledBeforeLoad = settled;
+    resolveRuntime?.(runtime);
+
+    expect(await outcome).toBe("TaskFlow cancellation requested");
+    expect(settledBeforeLoad).toBe(true);
+    expect(runtime.runToolRequest).not.toHaveBeenCalled();
+  });
 });

@@ -394,6 +394,113 @@ describe("resumeManagedLobsterFlow", () => {
 });
 
 describe("cancelled managed Lobster flows", () => {
+  it.each(["run", "resume"] as const)(
+    "does not start Lobster after TaskFlow cancellation wins %s admission",
+    async (action) => {
+      const cancelledFlow = {
+        flowId: "flow-1",
+        revision: 1,
+        syncMode: "managed" as const,
+        controllerId: "tests/lobster",
+        ownerKey: "agent:main:main",
+        status: "cancelled" as const,
+        goal: "Run Lobster workflow",
+        cancelRequestedAt: Date.now(),
+      };
+      const taskFlow = createFakeTaskFlow({
+        get: vi.fn().mockReturnValue(cancelledFlow),
+      });
+      const runner = createRunner({
+        ok: true,
+        status: "ok",
+        output: [],
+        requiresApproval: null,
+      });
+
+      const result = expectManagedFlowFailure(
+        action === "run"
+          ? await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner))
+          : await resumeManagedLobsterFlow(createResumeFlowParams(taskFlow, runner)),
+      );
+
+      expect(result.error.message).toBe("TaskFlow cancellation requested");
+      expect(runner.run).not.toHaveBeenCalled();
+      expect(taskFlow.finish).not.toHaveBeenCalled();
+      expect(taskFlow.fail).not.toHaveBeenCalled();
+    },
+  );
+
+  it("aborts active Lobster work without replacing the cancelled TaskFlow", async () => {
+    const taskFlow = createRuntimeTaskFlow().bindSession({
+      sessionKey: "agent:main:lobster-active-cancel",
+    });
+    const runner: LobsterRunner = {
+      run: vi.fn(
+        async (params) =>
+          await new Promise<never>((_resolve, reject) => {
+            const onAbort = () => {
+              const reason = params.signal?.reason;
+              reject(reason instanceof Error ? reason : new Error("Lobster workflow cancelled"));
+            };
+            params.signal?.addEventListener("abort", onAbort, { once: true });
+          }),
+      ),
+    };
+
+    const launched = launchManagedLobsterFlow(createRunFlowParams(taskFlow, runner));
+    expect(launched.ok).toBe(true);
+    if (!launched.ok || !launched.created) {
+      throw new Error("Expected managed Lobster flow to start");
+    }
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledOnce());
+
+    await expect(taskFlow.cancel({ flowId: launched.flow.flowId, cfg: {} })).resolves.toMatchObject(
+      { cancelled: true },
+    );
+    const result = expectManagedFlowFailure(await launched.completion);
+
+    expect(result.error.message).toBe("TaskFlow cancellation requested");
+    expect(taskFlow.get(launched.flow.flowId)?.status).toBe("cancelled");
+  });
+
+  it("observes cancellation that arrives as the runner settles", async () => {
+    let cancelled = false;
+    const taskFlow = createFakeTaskFlow({
+      get: vi.fn(() => ({
+        flowId: "flow-1",
+        revision: cancelled ? 1 : 0,
+        syncMode: "managed" as const,
+        controllerId: "tests/lobster",
+        ownerKey: "agent:main:main",
+        status: cancelled ? ("cancelled" as const) : ("running" as const),
+        notifyPolicy: "silent" as const,
+        goal: "Run Lobster workflow",
+        createdAt: 1,
+        updatedAt: cancelled ? 2 : 1,
+        ...(cancelled ? { cancelRequestedAt: Date.now() } : {}),
+      })),
+    });
+    const runner: LobsterRunner = {
+      run: vi.fn(async () => {
+        cancelled = true;
+        return {
+          ok: true as const,
+          status: "ok" as const,
+          output: [],
+          requiresApproval: null,
+        };
+      }),
+    };
+
+    const result = expectManagedFlowFailure(
+      await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner)),
+    );
+
+    expect(result.error.message).toBe("TaskFlow cancellation requested");
+    expect(taskFlow.finish).not.toHaveBeenCalled();
+    expect(taskFlow.fail).not.toHaveBeenCalled();
+  });
+
   it.each(["run", "resume"])(
     "persists a cancelled TaskFlow for a rejected Lobster %s",
     async (action) => {
