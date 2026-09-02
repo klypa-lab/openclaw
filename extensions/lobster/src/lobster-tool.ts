@@ -19,15 +19,21 @@ import {
 import {
   type BoundTaskFlow,
   type JsonLike,
+  type ManagedLobsterFlowUpdate,
   type ManagedLobsterFlowResult,
   launchManagedLobsterFlow,
   resumeManagedLobsterFlow,
 } from "./lobster-taskflow.js";
+import type { ManagedStatusMessageReceipt } from "./status-message.js";
 
 type LobsterToolOptions = {
   runner?: LobsterRunner;
   taskFlow?: BoundTaskFlow;
   getInvocationContext?: OpenClawPluginToolContext["getInvocationContext"];
+  createStatusMessage?: (
+    flow: NonNullable<ReturnType<BoundTaskFlow["get"]>>,
+  ) => Promise<ManagedStatusMessageReceipt | undefined>;
+  onFlowUpdate?: ManagedLobsterFlowUpdate;
 };
 
 function readOptionalTrimmedString(value: unknown, fieldName: string): string | undefined {
@@ -293,6 +299,10 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
           controllerId: flowParams.controllerId,
           goal: flowParams.goal,
           invocation,
+          ...(options?.createStatusMessage
+            ? { createStatusMessage: options.createStatusMessage }
+            : {}),
+          ...(options?.onFlowUpdate ? { onFlowUpdate: options.onFlowUpdate } : {}),
           ...(flowParams.stateJson !== undefined ? { stateJson: flowParams.stateJson } : {}),
           ...(flowParams.currentStep ? { currentStep: flowParams.currentStep } : {}),
           ...(flowParams.waitingStep ? { waitingStep: flowParams.waitingStep } : {}),
@@ -321,6 +331,7 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
             runnerParams: flowParams.runnerParams,
             flowId: flowParams.flowId,
             expectedRevision: flowParams.expectedRevision,
+            ...(options?.onFlowUpdate ? { onFlowUpdate: options.onFlowUpdate } : {}),
             ...(flowParams.currentStep ? { currentStep: flowParams.currentStep } : {}),
             ...(flowParams.waitingStep ? { waitingStep: flowParams.waitingStep } : {}),
           }),

@@ -667,6 +667,62 @@ describe("loadGatewayPlugins", () => {
     });
   });
 
+  test("binds portable channel send and edit actions without raw Gateway access", async () => {
+    const context = createTestContext("channel-message-action-owner");
+    serverPluginsModule.setFallbackGatewayContext(context);
+    loadOpenClawPlugins.mockReturnValue(createRegistry([]));
+    handleGatewayRequest.mockImplementationOnce(async (opts: HandleGatewayRequestOptions) => {
+      expect(opts.req.method).toBe("message.action");
+      expect(opts.req.params).toEqual({
+        channel: "telegram",
+        action: "edit",
+        sessionKey: "agent:main:test",
+        accountId: "operations",
+        idempotencyKey: "status-flow-1",
+        params: {
+          channel: "telegram",
+          to: "room-1",
+          messageId: "message-1",
+          message: "Done",
+        },
+      });
+      opts.respond(true, { ok: true, messageId: "message-1" });
+    });
+
+    loadGatewayPluginsForTest();
+    const runtimeOptions = getLastPluginLoadOption("runtimeOptions") as
+      | Parameters<PluginRuntimeModule["createPluginRuntime"]>[0]
+      | undefined;
+    const messageAction = runtimeOptions?.dispatchChannelMessageAction;
+    if (!messageAction) {
+      throw new Error("Expected gateway plugin load to bind channel message actions");
+    }
+
+    await expect(
+      gatewayRequestScopeModule.withPluginRuntimePluginScope(
+        { pluginId: "lobster", pluginOrigin: "bundled" },
+        () =>
+          messageAction(
+            {
+              channel: "telegram",
+              action: "edit",
+              sessionKey: "agent:main:test",
+              accountId: "operations",
+              idempotencyKey: "status-flow-1",
+              params: {
+                channel: "telegram",
+                to: "room-1",
+                messageId: "message-1",
+                message: "Done",
+              },
+            },
+            { timeoutMs: 90_000 },
+          ),
+      ),
+    ).resolves.toEqual({ ok: true, messageId: "message-1" });
+    expect(getLastDispatchedClientInternal().pluginRuntimeOwnerId).toBe("lobster");
+  });
+
   test("injects the process HOME-isolation fact into registry construction", () => {
     loadOpenClawPlugins.mockReturnValue(createRegistry([]));
     const home = os.userInfo().homedir;

@@ -19,7 +19,6 @@ import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot
 import { getPluginModuleLoaderStats } from "../plugins/plugin-module-loader-cache.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import type { PluginRegistryParams } from "../plugins/registry-types.js";
-import { getActivePluginRegistry } from "../plugins/runtime.js";
 import {
   bindGatewayContextResolver,
   getPluginRuntimeGatewayRequestScope,
@@ -32,11 +31,7 @@ import {
   type PluginRuntimeLoadContext,
 } from "../plugins/runtime/load-context.js";
 import { resolvePluginSubagentCompletionRequester } from "../plugins/runtime/subagent-requester-context.js";
-import type {
-  CreatePluginRuntimeOptions,
-  PluginRuntime,
-  RuntimeGatewayRequestOptions,
-} from "../plugins/runtime/types.js";
+import type { CreatePluginRuntimeOptions, PluginRuntime } from "../plugins/runtime/types.js";
 import type { PluginLogger, PluginOrigin } from "../plugins/types.js";
 import { ADMIN_SCOPE, authorizeOperatorScopesForRequiredScope } from "./method-scopes.js";
 import { normalizeOperatorScopeList, type OperatorScope } from "./operator-scopes.js";
@@ -51,7 +46,11 @@ import {
   dispatchGatewayMethodInProcessRaw,
   getInProcessGatewayRequestContext,
 } from "./server-plugin-in-process-dispatch.js";
-import { resolvePluginSubagentToolsAlsoAllow } from "./server-plugin-runtime-client.js";
+import {
+  canTrustedOfficialPluginRequestScopes,
+  dispatchTrustedPluginGatewayMethod,
+  resolvePluginSubagentToolsAlsoAllow,
+} from "./server-plugin-runtime-client.js";
 import {
   normalizePluginSubagentAllowedModelRef,
   normalizePluginSubagentRunRuntime,
@@ -70,6 +69,7 @@ export {
   getInProcessGatewayRequestContext,
 };
 export type { GatewayMethodDispatchResponse } from "./server-plugin-in-process-dispatch.js";
+export { dispatchTrustedPluginGatewayMethod } from "./server-plugin-runtime-client.js";
 export { hasInProcessGatewayContext } from "./server-plugins-node-runtime.js";
 
 type PluginSubagentOverridePolicy = {
@@ -185,22 +185,6 @@ function canClientUseModelOverride(client: GatewayRequestOptions["client"]): boo
   return hasAdminScope(client) || client?.internal?.allowModelOverride === true;
 }
 
-function canTrustedOfficialPluginRequestScopes(params: {
-  pluginId?: string;
-  pluginOrigin?: PluginOrigin;
-  pluginTrustedOfficialInstall?: boolean;
-}): boolean {
-  if (!params.pluginId) {
-    return false;
-  }
-  if (params.pluginOrigin === "bundled" || params.pluginTrustedOfficialInstall === true) {
-    return true;
-  }
-  const registry = getActivePluginRegistry();
-  const record = registry?.plugins.find((entry) => entry.id === params.pluginId);
-  return record?.origin === "bundled" || record?.trustedOfficialInstall === true;
-}
-
 function resolveRuntimeNodeInvokeSyntheticScopes(params: {
   pluginId?: string;
   pluginOrigin?: PluginOrigin;
@@ -209,28 +193,6 @@ function resolveRuntimeNodeInvokeSyntheticScopes(params: {
 }): OperatorScope[] | undefined {
   // Requested scopes may replace caller scopes, so only bundled or trusted official plugins qualify.
   return canTrustedOfficialPluginRequestScopes(params) ? params.requestedScopes : undefined;
-}
-
-export async function dispatchTrustedPluginGatewayMethod<T>(
-  method: string,
-  params: Record<string, unknown> = {},
-  options?: RuntimeGatewayRequestOptions,
-  resolveGatewayContext?: GatewayContextResolver,
-): Promise<T> {
-  const scope = getPluginRuntimeGatewayRequestScope();
-  const pluginId = scope?.pluginId?.trim();
-  if (!canTrustedOfficialPluginRequestScopes(scope ?? {})) {
-    throw new Error("Gateway requests are only available to bundled or trusted official plugins.");
-  }
-  const syntheticScopes = normalizeOperatorScopeList(options?.scopes);
-  return await dispatchGatewayMethodInProcess<T>(method, params, {
-    forceSyntheticClient: true,
-    pluginRuntimeOwnerId: pluginId,
-    resolveGatewayContext,
-    ...(!scope?.client ? { operatorRoleActor: { kind: "system" as const } } : {}),
-    ...(syntheticScopes ? { syntheticScopes } : {}),
-    ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-  });
 }
 
 const PLUGIN_SUBAGENT_SESSION_MESSAGES_MAX_LIMIT = 1_000;
@@ -498,7 +460,7 @@ function createGatewayPluginRuntimeBindings(
   overridePolicies: PluginSubagentOverridePolicies,
 ): {
   runtime: Pick<PluginRuntime, "gateway" | "hooks" | "nodes" | "subagent"> &
-    Pick<CreatePluginRuntimeOptions, "dispatchReplyFromConfig">;
+    Pick<CreatePluginRuntimeOptions, "dispatchReplyFromConfig" | "dispatchChannelMessageAction">;
   retire: () => void;
 } {
   let active = true;
@@ -526,6 +488,17 @@ function createGatewayPluginRuntimeBindings(
         return resolveBoundGatewayContext
           ? await withPluginRuntimeGatewayContextResolver(resolveBoundGatewayContext, run)
           : await run();
+      },
+      dispatchChannelMessageAction: async (params, options) => {
+        if (params.action !== "send" && params.action !== "edit") {
+          throw new Error("Plugin channel message actions support send and edit only.");
+        }
+        return await dispatchTrustedPluginGatewayMethod<Record<string, unknown>>(
+          "message.action",
+          params,
+          options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined,
+          resolveBoundGatewayContext,
+        );
       },
       gateway: {
         isAvailable: async () => hasInProcessGatewayContext(resolveBoundGatewayContext),

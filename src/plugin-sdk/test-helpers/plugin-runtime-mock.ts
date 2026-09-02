@@ -934,6 +934,9 @@ export function createPluginRuntimeMock(overrides: DeepPartial<PluginRuntime> = 
       },
       outbound: {
         loadAdapter: vi.fn<PluginRuntime["channel"]["outbound"]["loadAdapter"]>(),
+        messageAction: vi
+          .fn<PluginRuntime["channel"]["outbound"]["messageAction"]>()
+          .mockResolvedValue({}),
       },
       inbound: {
         run: runChannelTurnMock,

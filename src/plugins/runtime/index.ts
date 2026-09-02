@@ -286,11 +286,14 @@ export const createPluginRuntime: PluginRuntimeFactory = (
       listProviders: listWebSearchProviders,
       search: runWebSearch,
     },
-    channel: createRuntimeChannel(
-      _options.dispatchReplyFromConfig
+    channel: createRuntimeChannel({
+      ...(_options.dispatchReplyFromConfig
         ? { dispatchReplyFromConfig: _options.dispatchReplyFromConfig }
-        : undefined,
-    ),
+        : {}),
+      ...(_options.dispatchChannelMessageAction
+        ? { messageAction: _options.dispatchChannelMessageAction }
+        : {}),
+    }),
     events: createRuntimeEvents(),
     logging: createRuntimeLogging(),
     state: base.state,

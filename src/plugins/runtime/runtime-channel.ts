@@ -82,6 +82,7 @@ import type { PluginRuntime } from "./types.js";
 
 export function createRuntimeChannel(options?: {
   dispatchReplyFromConfig?: PluginRuntime["channel"]["reply"]["dispatchReplyFromConfig"];
+  messageAction?: PluginRuntime["channel"]["outbound"]["messageAction"];
 }): PluginRuntime["channel"] {
   const dispatchInbound: typeof dispatchRoutedChannelTurn = (params) =>
     dispatchRoutedChannelTurn({
@@ -193,6 +194,10 @@ export function createRuntimeChannel(options?: {
     },
     outbound: {
       loadAdapter: loadChannelOutboundAdapter,
+      messageAction:
+        options?.messageAction ??
+        (() =>
+          Promise.reject(new Error("Channel message actions require an active Gateway runtime."))),
     },
     inbound: {
       buildContext: buildChannelInboundEventContext,

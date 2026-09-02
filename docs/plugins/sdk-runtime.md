@@ -1069,7 +1069,7 @@ snapshots; OpenClaw owns all persistence and lifecycle coordination.
     | `groups` | Group policy and require-mention resolution. |
     | `debounce` | Inbound message debouncing. |
     | `commands` | Command authorization and text-command gating. |
-    | `outbound` | Load a channel's outbound adapter. |
+    | `outbound` | Load a channel's outbound adapter, or send/edit a portable message from an active Gateway runtime. |
     | `inbound` | Build inbound event context and run the shared inbound-event/reply kernel. |
     | `threadBindings` | Adjust idle-timeout/max-age for bound session threads. |
     | `runtimeContexts` | Register, read, and watch process-local per-channel/account/capability context. |
@@ -1086,6 +1086,30 @@ snapshots; OpenClaw owns all persistence and lifecycle coordination.
     ```
 
     Use `saveRemoteMedia(...)` when a remote URL should become OpenClaw media. Use `saveResponseMedia(...)` when the plugin already fetched a `Response` with plugin-owned auth, redirect, or allowlist handling. Use `readRemoteMediaBuffer(...)` only when the plugin needs raw bytes for inspection, transforms, decryption, or reupload. `fetchRemoteMedia(...)` remains a deprecated compatibility alias for `readRemoteMediaBuffer(...)`.
+
+    A bundled or trusted official Gateway-loaded plugin can send or edit a
+    channel-neutral text message through
+    `api.runtime.channel.outbound.messageAction(...)`. The Gateway still owns
+    channel resolution, session ownership checks, and adapter dispatch:
+
+    ```typescript
+    await api.runtime.channel.outbound.messageAction({
+      channel: "telegram",
+      action: "edit",
+      sessionKey,
+      idempotencyKey: `my-plugin-status-${revision}`,
+      params: {
+        channel: "telegram",
+        to: chatId,
+        messageId,
+        message: "Status: completed",
+      },
+    });
+    ```
+
+    The action is limited to `send` and `edit` and requires an active Gateway
+    runtime. Keep provider-specific formatting and policy in the channel
+    adapter; plugin code should pass only portable message fields.
 
     Remote media options and `fetchWithSsrFGuard(...)` from `openclaw/plugin-sdk/ssrf-runtime` accept a synchronous `beforeRequest` callback for final-dispatch authorization checks. It runs after proxy, DNS, and dispatcher preparation and immediately before every physical request. Redirects invoke it once per hop; media retries invoke it again for every attempt and hop. If it throws, that request is not sent and the same error propagates. Promise or thenable results are rejected before transport dispatch.
 

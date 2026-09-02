@@ -33,6 +33,40 @@ describe("inbound dispatch", () => {
   });
 });
 
+describe("outbound message actions", () => {
+  it("delegates portable send and edit requests to the bound Gateway runtime", async () => {
+    const messageAction = vi.fn().mockResolvedValue({ messageId: "message-1" });
+    const channel = createRuntimeChannel({ messageAction });
+    const request = {
+      channel: "telegram",
+      action: "send" as const,
+      sessionKey: "agent:main:test",
+      accountId: "operations",
+      idempotencyKey: "status-flow-1",
+      params: { channel: "telegram", to: "room-1", message: "Working" },
+    };
+
+    await expect(channel.outbound.messageAction(request, { timeoutMs: 90_000 })).resolves.toEqual({
+      messageId: "message-1",
+    });
+    expect(messageAction).toHaveBeenCalledWith(request, { timeoutMs: 90_000 });
+  });
+
+  it("rejects background message actions outside an active Gateway runtime", async () => {
+    const channel = createRuntimeChannel();
+
+    await expect(
+      channel.outbound.messageAction({
+        channel: "telegram",
+        action: "edit",
+        sessionKey: "agent:main:test",
+        idempotencyKey: "status-flow-1",
+        params: { channel: "telegram", to: "room-1", messageId: "1", message: "Done" },
+      }),
+    ).rejects.toThrow("active Gateway runtime");
+  });
+});
+
 describe("runtimeContexts", () => {
   it("registers, resolves, watches, and unregisters contexts", () => {
     const channel = createRuntimeChannel();

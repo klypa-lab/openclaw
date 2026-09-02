@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import plugin from "./index.js";
 import type { OpenClawPluginApi } from "./runtime-api.js";
 
-async function triggerGatewayStart(managedFlows: ReturnType<typeof createRuntimeTaskFlow>) {
+async function triggerGatewayStart(
+  managedFlows: ReturnType<typeof createRuntimeTaskFlow>,
+  messageAction = vi.fn().mockResolvedValue({ messageId: "message-1" }),
+) {
   const on = vi.fn();
   const api = createTestPluginApi({
     id: "lobster",
@@ -14,6 +17,7 @@ async function triggerGatewayStart(managedFlows: ReturnType<typeof createRuntime
       tasks: {
         managedFlows,
       },
+      channel: { outbound: { messageAction } },
     } as unknown as OpenClawPluginApi["runtime"],
   });
 
@@ -23,6 +27,7 @@ async function triggerGatewayStart(managedFlows: ReturnType<typeof createRuntime
     throw new Error("Lobster did not register Gateway restart recovery");
   }
   await hook({ port: 18789 }, {});
+  return { messageAction };
 }
 
 describe("lobster plugin startup", () => {
@@ -84,5 +89,64 @@ describe("lobster plugin startup", () => {
       revision: requested.flow.revision + 1,
       cancelRequestedAt: requested.flow.cancelRequestedAt,
     });
+  });
+
+  it("updates the existing status message when restart recovery settles a flow", async () => {
+    const managedFlows = createRuntimeTaskFlow();
+    const taskFlow = managedFlows.bindSession({
+      sessionKey: "agent:main:lobster-status-recovery",
+      requesterOrigin: {
+        channel: "telegram",
+        to: "123456",
+        accountId: "operations",
+        threadId: "42",
+      },
+    });
+    const created = taskFlow.createManaged({
+      controllerId: "lobster/run",
+      goal: "Run Lobster workflow",
+    });
+    const bound = taskFlow.updateProgress({
+      flowId: created.flowId,
+      expectedRevision: created.revision,
+      stateJson: {
+        statusMessage: {
+          ownerFlowId: created.flowId,
+          messageId: "status-1",
+        },
+      },
+    });
+    if (!bound.applied) {
+      throw new Error("Failed to seed a Lobster status message binding");
+    }
+    const started = taskFlow.resume({
+      flowId: created.flowId,
+      expectedRevision: bound.flow.revision,
+      status: "running",
+      runnerLease: { ownerId: "lobster", leaseId: "lease-before-restart" },
+    });
+    if (!started.applied) {
+      throw new Error("Failed to seed a stale Lobster flow");
+    }
+
+    const messageAction = vi.fn().mockResolvedValue({ messageId: "status-1" });
+    await triggerGatewayStart(managedFlows, messageAction);
+
+    expect(messageAction).toHaveBeenCalledOnce();
+    expect(messageAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "edit",
+        accountId: "operations",
+        sessionKey: "agent:main:lobster-status-recovery",
+        params: expect.objectContaining({
+          channel: "telegram",
+          to: "123456",
+          threadId: "42",
+          messageId: "status-1",
+          message: expect.stringContaining("Status: Failed"),
+        }),
+      }),
+      { timeoutMs: 90_000 },
+    );
   });
 });

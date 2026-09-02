@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { OpenClawPluginApi } from "../runtime-api.js";
 import type { LobsterEnvelope, LobsterRunner, LobsterRunnerParams } from "./lobster-runner.js";
+import { attachManagedStatusMessage, type ManagedStatusMessageReceipt } from "./status-message.js";
 
 export type JsonLike =
   | null
@@ -19,6 +20,8 @@ export type BoundTaskFlow = ReturnType<
 >;
 
 type FlowRecord = NonNullable<ReturnType<BoundTaskFlow["tryCreateManaged"]>>;
+
+export type ManagedLobsterFlowUpdate = (flow: FlowRecord) => Promise<void>;
 
 export const LOBSTER_RUNNER_LEASE = Object.freeze({
   ownerId: "lobster",
@@ -56,6 +59,8 @@ type RunManagedLobsterFlowParams = {
   currentStep?: string;
   waitingStep?: string;
   invocation: { runId: string; toolCallId: string };
+  createStatusMessage?: (flow: FlowRecord) => Promise<ManagedStatusMessageReceipt | undefined>;
+  onFlowUpdate?: ManagedLobsterFlowUpdate;
 };
 
 type ResumeManagedLobsterFlowParams = {
@@ -70,6 +75,7 @@ type ResumeManagedLobsterFlowParams = {
   expectedRevision: number;
   currentStep?: string;
   waitingStep?: string;
+  onFlowUpdate?: ManagedLobsterFlowUpdate;
 };
 
 export type ManagedLobsterFlowResult =
@@ -196,12 +202,29 @@ function asManagedFlow(value: ReturnType<BoundTaskFlow["get"]>): FlowRecord | un
   return isManagedFlow(value) ? value : undefined;
 }
 
+async function publishFlowUpdate(
+  onFlowUpdate: ManagedLobsterFlowUpdate | undefined,
+  flow: FlowRecord,
+): Promise<void> {
+  if (!onFlowUpdate) {
+    return;
+  }
+  try {
+    await onFlowUpdate(flow);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[lobster] status message update failed flow=${flow.flowId} revision=${String(flow.revision)}: ${message}`,
+    );
+  }
+}
+
 function applyManagedLobsterProgress(params: {
   taskFlow: BoundTaskFlow;
   flowId: string;
   expectedRevision: number;
   event: unknown;
-}): number {
+}): FlowRecord {
   const event = parseTaskFlowProgressEvent(params.event);
   const mutation = params.taskFlow.updateProgress({
     flowId: params.flowId,
@@ -209,7 +232,7 @@ function applyManagedLobsterProgress(params: {
     currentStep: event.currentStep,
   });
   if (mutation.applied) {
-    return mutation.flow.revision;
+    return mutation.flow;
   }
   throw new Error(`TaskFlow progress event persistence failed: ${mutation.code}`);
 }
@@ -220,6 +243,7 @@ async function runWithTaskFlowCancellation(params: {
   ownedRevision: OwnedFlowRevision;
   runner: LobsterRunner;
   runnerParams: LobsterRunnerParams;
+  onFlowUpdate?: ManagedLobsterFlowUpdate;
 }): Promise<LobsterEnvelope> {
   const controller = new AbortController();
   const checkCancellation = () => {
@@ -246,14 +270,15 @@ async function runWithTaskFlowCancellation(params: {
     const envelope = await params.runner.run({
       ...params.runnerParams,
       signal,
-      onTaskFlowEvent: (event) => {
-        params.ownedRevision.current = applyManagedLobsterProgress({
+      onTaskFlowEvent: async (event) => {
+        const flow = applyManagedLobsterProgress({
           taskFlow: params.taskFlow,
           flowId: params.flowId,
           expectedRevision: params.ownedRevision.current,
           event,
         });
-        return Promise.resolve();
+        params.ownedRevision.current = flow.revision;
+        await publishFlowUpdate(params.onFlowUpdate, flow);
       },
     });
     checkCancellation();
@@ -267,38 +292,69 @@ async function runWithTaskFlowCancellation(params: {
 async function executeManagedLobsterFlow(
   params: Pick<
     RunManagedLobsterFlowParams,
-    "taskFlow" | "config" | "runner" | "runnerParams" | "waitingStep"
+    | "taskFlow"
+    | "config"
+    | "runner"
+    | "runnerParams"
+    | "waitingStep"
+    | "createStatusMessage"
+    | "onFlowUpdate"
   >,
   flow: FlowRecord,
 ): Promise<ManagedLobsterFlowResult> {
   // Only revisions committed by this runner may advance its authority. Adopting
   // a refreshed revision could let a stale runner settle a replacement run.
   const ownedRevision: OwnedFlowRevision = { current: flow.revision };
+  let activeFlow = flow;
+  let statusStateForFailure: JsonLike | undefined;
   try {
+    if (params.createStatusMessage) {
+      const receipt = await params.createStatusMessage(flow);
+      if (receipt) {
+        statusStateForFailure = attachManagedStatusMessage(flow.stateJson, flow.flowId, receipt);
+        const bound = params.taskFlow.updateProgress({
+          flowId: flow.flowId,
+          expectedRevision: ownedRevision.current,
+          currentStep: flow.currentStep,
+          stateJson: statusStateForFailure,
+        });
+        if (!bound.applied) {
+          throw new Error(`TaskFlow status message bind failed: ${bound.code}`);
+        }
+        activeFlow = bound.flow;
+        ownedRevision.current = bound.flow.revision;
+        statusStateForFailure = undefined;
+      }
+    }
     const envelope = await runWithTaskFlowCancellation({
       taskFlow: params.taskFlow,
-      flowId: flow.flowId,
+      flowId: activeFlow.flowId,
       ownedRevision,
       runner: params.runner,
       runnerParams: params.runnerParams,
+      ...(params.onFlowUpdate ? { onFlowUpdate: params.onFlowUpdate } : {}),
     });
     if (envelope.ok && envelope.status === "cancelled") {
       try {
         const requested = params.taskFlow.requestCancel({
-          flowId: flow.flowId,
+          flowId: activeFlow.flowId,
           expectedRevision: ownedRevision.current,
         });
         if (!requested.applied) {
           return {
             ok: false,
-            flow: asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow,
+            flow: asManagedFlow(params.taskFlow.get(activeFlow.flowId)) ?? activeFlow,
             mutation: requested,
             error: new Error(`TaskFlow cancellation failed: ${requested.code}`),
           };
         }
         ownedRevision.current = requested.flow.revision;
-        const mutation = await params.taskFlow.cancel({ flowId: flow.flowId, cfg: params.config });
-        const current = asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow;
+        const mutation = await params.taskFlow.cancel({
+          flowId: activeFlow.flowId,
+          cfg: params.config,
+        });
+        const current = asManagedFlow(params.taskFlow.get(activeFlow.flowId)) ?? activeFlow;
+        await publishFlowUpdate(params.onFlowUpdate, current);
         return mutation.cancelled
           ? { ok: true, envelope, flow: current, mutation }
           : {
@@ -311,21 +367,24 @@ async function executeManagedLobsterFlow(
         const err = error instanceof Error ? error : new Error(String(error));
         return {
           ok: false,
-          flow: asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow,
+          flow: asManagedFlow(params.taskFlow.get(activeFlow.flowId)) ?? activeFlow,
           error: err,
         };
       }
     }
     if (!envelope.ok) {
       const mutation = params.taskFlow.fail({
-        flowId: flow.flowId,
+        flowId: activeFlow.flowId,
         expectedRevision: ownedRevision.current,
       });
+      if (mutation.applied) {
+        await publishFlowUpdate(params.onFlowUpdate, mutation.flow);
+      }
       return {
         ok: false,
         flow: mutation.applied
           ? mutation.flow
-          : (asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow),
+          : (asManagedFlow(params.taskFlow.get(activeFlow.flowId)) ?? activeFlow),
         mutation,
         error: new Error(envelope.error.message),
       };
@@ -333,27 +392,28 @@ async function executeManagedLobsterFlow(
     const mutation =
       envelope.status === "needs_approval"
         ? params.taskFlow.setWaiting({
-            flowId: flow.flowId,
+            flowId: activeFlow.flowId,
             expectedRevision: ownedRevision.current,
             currentStep: params.waitingStep ?? "await_lobster_approval",
             waitJson: buildApprovalWaitState(envelope),
           })
         : params.taskFlow.finish({
-            flowId: flow.flowId,
+            flowId: activeFlow.flowId,
             expectedRevision: ownedRevision.current,
           });
     if (!mutation.applied) {
       return {
         ok: false,
-        flow: asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow,
+        flow: asManagedFlow(params.taskFlow.get(activeFlow.flowId)) ?? activeFlow,
         mutation,
         error: new Error(`TaskFlow transition failed: ${mutation.code}`),
       };
     }
+    await publishFlowUpdate(params.onFlowUpdate, mutation.flow);
     return { ok: true, envelope, flow: mutation.flow, mutation };
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
-    const persisted = asManagedFlow(params.taskFlow.get(flow.flowId));
+    const persisted = asManagedFlow(params.taskFlow.get(activeFlow.flowId));
     // Cancellation is already terminal state; a runner rejection must not
     // replace it with failure after the abort reaches embedded Lobster work.
     if (persisted?.status === "cancelled" || persisted?.cancelRequestedAt != null) {
@@ -361,21 +421,25 @@ async function executeManagedLobsterFlow(
     }
     try {
       const mutation = params.taskFlow.fail({
-        flowId: flow.flowId,
+        flowId: activeFlow.flowId,
         expectedRevision: ownedRevision.current,
+        ...(statusStateForFailure !== undefined ? { stateJson: statusStateForFailure } : {}),
       });
+      if (mutation.applied) {
+        await publishFlowUpdate(params.onFlowUpdate, mutation.flow);
+      }
       return {
         ok: false,
         flow: mutation.applied
           ? mutation.flow
-          : (asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow),
+          : (asManagedFlow(params.taskFlow.get(activeFlow.flowId)) ?? activeFlow),
         mutation,
         error: err,
       };
     } catch {
       return {
         ok: false,
-        flow: asManagedFlow(params.taskFlow.get(flow.flowId)) ?? flow,
+        flow: asManagedFlow(params.taskFlow.get(activeFlow.flowId)) ?? activeFlow,
         error: err,
       };
     }
@@ -429,5 +493,6 @@ export async function resumeManagedLobsterFlow(
       error: new Error(`TaskFlow resume failed: ${resumed.code}`),
     };
   }
+  await publishFlowUpdate(params.onFlowUpdate, resumed.flow);
   return await executeManagedLobsterFlow(params, resumed.flow);
 }

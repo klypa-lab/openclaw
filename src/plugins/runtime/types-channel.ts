@@ -34,6 +34,18 @@ type DispatchReplyWithBufferedBlockDispatcher =
   import("../../auto-reply/reply/provider-dispatcher.types.js").DispatchReplyWithBufferedBlockDispatcher;
 type RecordInboundSession = import("../../channels/session.types.js").RecordInboundSession;
 
+type RuntimeChannelMessageAction = (
+  params: {
+    channel: string;
+    action: "send" | "edit";
+    sessionKey: string;
+    accountId?: string;
+    idempotencyKey: string;
+    params: Record<string, unknown>;
+  },
+  options?: { timeoutMs?: number },
+) => Promise<Record<string, unknown>>;
+
 type RuntimeThreadBindingLifecycleRecord =
   | import("../../infra/outbound/session-binding.types.js").SessionBindingRecord
   | {
@@ -181,6 +193,8 @@ export type PluginRuntimeChannel = {
   };
   outbound: {
     loadAdapter: LoadChannelOutboundAdapter;
+    /** Send or edit a portable channel message without exposing raw Gateway methods. */
+    messageAction: RuntimeChannelMessageAction;
   };
   inbound: {
     buildContext: typeof import("../../channels/inbound-event/context.js").buildChannelInboundEventContext;

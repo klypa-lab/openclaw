@@ -203,6 +203,7 @@ export type PluginRuntime = PluginRuntimeCore & {
 
 export type CreatePluginRuntimeOptions = {
   dispatchReplyFromConfig?: PluginRuntime["channel"]["reply"]["dispatchReplyFromConfig"];
+  dispatchChannelMessageAction?: PluginRuntime["channel"]["outbound"]["messageAction"];
   gateway?: PluginRuntime["gateway"];
   hooks?: PluginRuntime["hooks"];
   subagent?: PluginRuntime["subagent"];

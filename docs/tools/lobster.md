@@ -339,6 +339,12 @@ the same Task Flow record and passes the original pipeline item through
 unchanged. Each update advances the flow revision. A late update cannot replace
 a terminal flow state.
 
+When managed mode starts from a supported message channel, Lobster creates one
+status message after the Task Flow record exists. Newer Task Flow revisions edit
+that same message with the current step and terminal result. Retries and Gateway
+restart recovery keep the existing message identity instead of creating another
+status message.
+
 Managed mode requires a bound Task Flow runtime and is intended for
 plugin/controller code that needs durable flow state across gateway restarts,
 not typical ad hoc agent use.

@@ -8,16 +8,60 @@ import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/version.js
 import { isKnownCoreToolId } from "../agents/tool-catalog.js";
 import { normalizeToolPolicyName } from "../agents/tool-policy.js";
 import { getActivePluginRegistry } from "../plugins/runtime.js";
+import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import type { PluginSubagentRequesterContext } from "../plugins/runtime/subagent-requester-context.js";
 import type { RuntimePluginToolGrant } from "../plugins/runtime/tool-grant.js";
+import type { RuntimeGatewayRequestOptions } from "../plugins/runtime/types.js";
+import type { PluginOrigin } from "../plugins/types.js";
 import { APPROVALS_SCOPE, WRITE_SCOPE } from "./method-scopes.js";
+import { normalizeOperatorScopeList } from "./operator-scopes.js";
 import type { TrustedSessionCreation } from "./server-methods/session-creation-provenance.js";
 import type { GatewayOperatorRoleActor } from "./server-methods/shared-types.js";
 import type {
   GatewayAgentRunTaskOwner,
+  GatewayContextResolver,
   GatewayRequestOptions,
   TrustedAgentToolCaller,
 } from "./server-methods/types.js";
+import { dispatchGatewayMethodInProcess } from "./server-plugin-in-process-dispatch.js";
+
+export function canTrustedOfficialPluginRequestScopes(params: {
+  pluginId?: string;
+  pluginOrigin?: PluginOrigin;
+  pluginTrustedOfficialInstall?: boolean;
+}): boolean {
+  if (!params.pluginId) {
+    return false;
+  }
+  if (params.pluginOrigin === "bundled" || params.pluginTrustedOfficialInstall === true) {
+    return true;
+  }
+  const registry = getActivePluginRegistry();
+  const record = registry?.plugins.find((entry) => entry.id === params.pluginId);
+  return record?.origin === "bundled" || record?.trustedOfficialInstall === true;
+}
+
+export async function dispatchTrustedPluginGatewayMethod<T>(
+  method: string,
+  params: Record<string, unknown> = {},
+  options?: RuntimeGatewayRequestOptions,
+  resolveGatewayContext?: GatewayContextResolver,
+): Promise<T> {
+  const scope = getPluginRuntimeGatewayRequestScope();
+  const pluginId = scope?.pluginId?.trim();
+  if (!canTrustedOfficialPluginRequestScopes(scope ?? {})) {
+    throw new Error("Gateway requests are only available to bundled or trusted official plugins.");
+  }
+  const syntheticScopes = normalizeOperatorScopeList(options?.scopes);
+  return await dispatchGatewayMethodInProcess<T>(method, params, {
+    forceSyntheticClient: true,
+    pluginRuntimeOwnerId: pluginId,
+    resolveGatewayContext,
+    ...(!scope?.client ? { operatorRoleActor: { kind: "system" as const } } : {}),
+    ...(syntheticScopes ? { syntheticScopes } : {}),
+    ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+  });
+}
 
 export function createSyntheticPluginRuntimeClient(params?: {
   authenticatedUserProfile?: NonNullable<
