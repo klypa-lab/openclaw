@@ -396,6 +396,7 @@ const clickclackPlugin = {
     },
   },
   actions: {
+    describeMessageTool: () => ({ actions: ["edit"] }),
     supportsAction: ({ action }) => action === "edit",
     handleAction: async ({ action, params, cfg, accountId }) => {
       if (action !== "edit") {

@@ -228,7 +228,8 @@ export function createManagedStatusMessageProjector(api: OpenClawPluginApi) {
           { timeoutMs: STATUS_MESSAGE_ACTION_TIMEOUT_MS },
         ),
       );
-      const messageId = boundedId(response?.messageId);
+      const messageId =
+        boundedId(response?.messageId) ?? boundedId(asOptionalRecord(response?.result)?.messageId);
       if (!messageId) {
         throw new Error("Status message send did not return a messageId");
       }

@@ -7,8 +7,8 @@ import {
   createManagedStatusMessageProjector,
 } from "./status-message.js";
 
-function createProjector() {
-  const messageAction = vi.fn().mockResolvedValue({ messageId: "message-1" });
+function createProjector(response: Record<string, unknown> = { messageId: "message-1" }) {
+  const messageAction = vi.fn().mockResolvedValue(response);
   const api = createTestPluginApi({
     id: "lobster",
     name: "lobster",
@@ -76,6 +76,21 @@ describe("managed Lobster status message", () => {
       },
       { timeoutMs: 90_000 },
     );
+  });
+
+  it("reads the receipt from the core outbound send result", async () => {
+    const { projector } = createProjector({
+      channel: "telegram",
+      to: "-100123",
+      via: "direct",
+      result: { messageId: "message-2" },
+      deliveryStatus: "sent",
+    });
+    const { flow, sessionKey } = createFlow();
+
+    await expect(projector.create(sessionKey, flow)).resolves.toEqual({
+      messageId: "message-2",
+    });
   });
 
   it("edits the same message only for authoritative newer revisions", async () => {
