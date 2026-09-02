@@ -9,10 +9,10 @@ export default definePluginEntry({
   name: "Lobster",
   description: "Optional local shell helper tools",
   register(api: OpenClawPluginApi) {
-    api.on("gateway_start", () => {
-      const recovered = recoverOrphanedLobsterFlows(api);
+    api.on("gateway_start", async () => {
+      const recovered = await recoverOrphanedLobsterFlows(api);
       if (recovered > 0) {
-        api.logger.warn(`Marked ${recovered} interrupted Lobster workflow(s) as failed.`);
+        api.logger.warn(`Reconciled ${recovered} interrupted Lobster workflow(s).`);
       }
     });
     api.registerTool(

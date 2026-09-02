@@ -4,7 +4,7 @@ import { LOBSTER_RUNNER_LEASE } from "./lobster-taskflow.js";
 
 const RUNNER_STOPPED_SUMMARY = "The Gateway runner stopped before the workflow completed.";
 
-export function recoverOrphanedLobsterFlows(api: OpenClawPluginApi): number {
+export async function recoverOrphanedLobsterFlows(api: OpenClawPluginApi): Promise<number> {
   const managedFlows = api.runtime?.tasks.managedFlows;
   if (!managedFlows) {
     return 0;
@@ -19,13 +19,24 @@ export function recoverOrphanedLobsterFlows(api: OpenClawPluginApi): number {
       sessionKey: flow.ownerKey,
       ...(flow.requesterOrigin ? { requesterOrigin: flow.requesterOrigin } : {}),
     });
-    const result = taskFlow.fail({
+    if (flow.cancelRequestedAt != null) {
+      const result = await taskFlow.cancel({ flowId: flow.flowId, cfg: api.config });
+      if (result.cancelled) {
+        recovered += 1;
+      } else {
+        api.logger.warn(
+          `Could not finish cancellation for interrupted Lobster workflow ${flow.flowId}: ${result.reason ?? "unknown error"}`,
+        );
+      }
+      continue;
+    }
+    const failed = taskFlow.fail({
       flowId: flow.flowId,
       expectedRevision: flow.revision,
       ...(flow.stateJson !== undefined ? { stateJson: flow.stateJson } : {}),
       blockedSummary: RUNNER_STOPPED_SUMMARY,
     });
-    if (result.applied) {
+    if (failed.applied) {
       recovered += 1;
     }
   }
