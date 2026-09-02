@@ -316,6 +316,80 @@ it("keeps version and injected instance surfaces independent of the broad runtim
   expect(loadPluginModule).not.toHaveBeenCalled();
 });
 
+it("borrows channel message actions for gateway-bound scoped plugin loads", async () => {
+  useNoBundledPlugins();
+  const resolveRuntime = vi.spyOn(sdkAlias, "resolvePluginRuntimeModulePathWithDiagnostics");
+  const createLoader = loaderModule.createPluginModuleLoader;
+  const fallbackMessageAction = vi.fn().mockRejectedValue(new Error("missing Gateway binding"));
+  vi.spyOn(loaderModule, "createPluginModuleLoader").mockImplementation((options) => {
+    const load = createLoader(options);
+    return (modulePath) => {
+      if (modulePath === resolveRuntime.mock.results.at(-1)?.value?.resolvedPath) {
+        return {
+          createPluginRuntime: (runtimeOptions: {
+            dispatchChannelMessageAction?: PluginRuntime["channel"]["outbound"]["messageAction"];
+          }) =>
+            ({
+              channel: {
+                outbound: {
+                  messageAction:
+                    runtimeOptions?.dispatchChannelMessageAction ?? fallbackMessageAction,
+                },
+              },
+            }) as PluginRuntime,
+        };
+      }
+      return load(modulePath);
+    };
+  });
+  const plugin = writePlugin({
+    id: "channel-message-action-runtime",
+    body: `module.exports = { id: "channel-message-action-runtime", register() {} };`,
+  });
+  const config = {
+    plugins: {
+      allow: [plugin.id],
+      load: { paths: [plugin.file] },
+      slots: { memory: "none" },
+    },
+  };
+  const messageAction = vi.fn().mockResolvedValue({ messageId: "status-1" });
+  loadAndActivateRootPluginRegistry({
+    cache: false,
+    config,
+    runtimeOptions: {
+      allowGatewaySubagentBinding: true,
+      dispatchChannelMessageAction: messageAction,
+    },
+  });
+  const scoped = loadPluginRegistryHandle({
+    cache: false,
+    config,
+    onlyPluginIds: [plugin.id],
+    runtimeOptions: { allowGatewaySubagentBinding: true },
+  });
+  const runtime = getPluginRegistryRuntime(scoped);
+  if (!runtime) {
+    throw new Error("expected a scoped plugin runtime");
+  }
+
+  await expect(
+    runtime.channel.outbound.messageAction({
+      channel: "clickclack",
+      action: "send",
+      sessionKey: "agent:main:channel-message-action-runtime",
+      idempotencyKey: "channel-message-action-runtime",
+      params: { channel: "clickclack", to: "channel:general", message: "Running" },
+    }),
+  ).resolves.toEqual({ messageId: "status-1" });
+  expect(messageAction).toHaveBeenCalledWith(
+    expect.objectContaining({
+      sessionKey: "agent:main:channel-message-action-runtime",
+      action: "send",
+    }),
+  );
+});
+
 describe("cached plugin load failures", () => {
   it.each([
     { name: "active root registry", load: loadAndActivateRootPluginRegistry, activates: true },

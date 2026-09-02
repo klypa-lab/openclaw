@@ -259,6 +259,21 @@ async function handleRequest(req, res) {
       json(res, 200, { message });
       return;
     }
+    const messageMatch = url.pathname.match(/^\/api\/messages\/([^/]+)$/u);
+    if (req.method === "PATCH" && messageMatch) {
+      const messageId = decodeURIComponent(messageMatch[1]);
+      const message = [...messages, ...threadReplies].find((entry) => entry.id === messageId);
+      if (!message) {
+        json(res, 404, { error: `message not found: ${messageId}` });
+        return;
+      }
+      const body = await readBody(req);
+      message.body = String(body.body ?? "");
+      message.edited_at = now();
+      persist();
+      json(res, 200, { message });
+      return;
+    }
     const threadReplyMatch = url.pathname.match(/^\/api\/messages\/([^/]+)\/thread\/replies$/u);
     if (req.method === "POST" && threadReplyMatch) {
       const body = await readBody(req);

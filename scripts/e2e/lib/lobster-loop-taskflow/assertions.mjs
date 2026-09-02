@@ -80,11 +80,38 @@ function assertFlow(filePath) {
   if (flow.status !== "succeeded" || typeof flow.endedAt !== "number") {
     throw new Error(`TaskFlow is not terminal: ${JSON.stringify(flow)}`);
   }
-  if (flow.currentStep !== "commands_list" || flow.revision !== 2) {
+  if (flow.currentStep !== "commands_list" || flow.revision !== 3) {
     throw new Error(`TaskFlow progress was not preserved: ${JSON.stringify(flow)}`);
   }
-  if (JSON.stringify(flow.stateJson) !== JSON.stringify(FLOW_STATE)) {
-    throw new Error(`TaskFlow trace state mismatch: ${JSON.stringify(flow.stateJson)}`);
+  if (JSON.stringify(flow.stateJson?.automation) !== JSON.stringify(FLOW_STATE.automation)) {
+    throw new Error(`TaskFlow automation trace state mismatch: ${JSON.stringify(flow.stateJson)}`);
+  }
+  if (
+    flow.stateJson?.statusMessage?.ownerFlowId !== flow.flowId ||
+    typeof flow.stateJson?.statusMessage?.messageId !== "string"
+  ) {
+    throw new Error(`TaskFlow status message binding mismatch: ${JSON.stringify(flow.stateJson)}`);
+  }
+  return flow;
+}
+
+function assertStatusMessage(filePath, flow) {
+  const state = readJson(filePath);
+  const statusMessages = (state.outboundMessages ?? []).filter(
+    (message) => typeof message?.body === "string" && message.body.startsWith("Lobster: "),
+  );
+  if (statusMessages.length !== 1) {
+    throw new Error(`expected one Lobster status message, found ${statusMessages.length}`);
+  }
+  const statusMessage = statusMessages[0];
+  if (statusMessage.id !== flow.stateJson.statusMessage.messageId) {
+    throw new Error("Lobster status message does not match the persisted TaskFlow binding");
+  }
+  if (!statusMessage.edited_at || !statusMessage.body.includes("Status: Completed")) {
+    throw new Error(`Lobster status message was not updated to completion: ${statusMessage.body}`);
+  }
+  if (!statusMessage.body.includes("Step: commands_list")) {
+    throw new Error(`Lobster status message lost the final step: ${statusMessage.body}`);
   }
 }
 
@@ -126,11 +153,12 @@ if (command === "job-id") {
   }
   process.stdout.write(`${flow.flowId}\n`);
 } else if (command === "verify") {
-  const [jobsPath, runPath, flowPath, requestLogPath] = args;
+  const [jobsPath, runPath, flowPath, requestLogPath, clickClackStatePath] = args;
   findLoopJob(jobsPath);
   assertRunSucceeded(runPath);
-  assertFlow(flowPath);
+  const flow = assertFlow(flowPath);
   assertProviderTrace(requestLogPath);
+  assertStatusMessage(clickClackStatePath, flow);
   console.log("Packaged /loop -> Automation -> Lobster -> TaskFlow proof passed.");
 } else {
   throw new Error("usage: assertions.mjs <job-id|flow-id-if-terminal|verify> <artifact paths...>");

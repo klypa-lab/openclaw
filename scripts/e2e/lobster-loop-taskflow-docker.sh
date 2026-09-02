@@ -43,7 +43,7 @@ if ! docker_e2e_run_with_harness \
   -e "OPENCLAW_SKIP_ACPX_RUNTIME=1" \
   -e "OPENCLAW_SKIP_ACPX_RUNTIME_PROBE=1" \
   -e "OPENCLAW_TEST_STATE_SCRIPT_B64=$OPENCLAW_TEST_STATE_SCRIPT_B64" \
-  "${OPENCLAW_PREPUBLISH_PLUGIN_REGISTRY_DOCKER_ARGS[@]}" \
+  ${OPENCLAW_PREPUBLISH_PLUGIN_REGISTRY_DOCKER_ARGS[@]+"${OPENCLAW_PREPUBLISH_PLUGIN_REGISTRY_DOCKER_ARGS[@]}"} \
   "$IMAGE_NAME" \
   bash -lc 'set -Eeuo pipefail
     source scripts/lib/openclaw-e2e-instance.sh
@@ -162,13 +162,14 @@ if ! docker_e2e_run_with_harness \
       sleep 0.25
     done
     if [ -z "$flow_id" ]; then
+      dump_logs 1
       echo "managed Lobster TaskFlow did not reach succeeded" >&2
       exit 1
     fi
 
     openclaw tasks flow show "$flow_id" --json >"$flow_json"
     node scripts/e2e/lib/lobster-loop-taskflow/assertions.mjs verify \
-      "$jobs_json" "$run_json" "$flow_json" "$request_log"
+      "$jobs_json" "$run_json" "$flow_json" "$request_log" "$clickclack_state"
   ' >"$RUN_LOG" 2>&1; then
   docker_e2e_print_log "$RUN_LOG"
   exit 1

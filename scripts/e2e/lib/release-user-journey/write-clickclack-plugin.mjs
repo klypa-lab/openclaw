@@ -165,6 +165,20 @@ async function sendText(cfg, to, text, accountId, threadId, replyToId) {
   return data.message;
 }
 
+async function editText(cfg, messageId, text, accountId) {
+  const account = resolveAccount(cfg, accountId);
+  if (!account.configured) {
+    throw new Error("ClickClack is not configured");
+  }
+  const data = await requestJson(
+    account,
+    "PATCH",
+    \`/api/messages/\${encodeURIComponent(messageId)}\`,
+    { body: text },
+  );
+  return data.message;
+}
+
 function decodeFrame(buffer) {
   if (buffer.length < 2) {
     return null;
@@ -379,6 +393,22 @@ const clickclackPlugin = {
     sendText: async (ctx) => {
       const message = await sendText(ctx.cfg, ctx.to, ctx.text, ctx.accountId, ctx.threadId, ctx.replyToId);
       return { channel: CHANNEL_ID, messageId: message.id };
+    },
+  },
+  actions: {
+    supportsAction: ({ action }) => action === "edit",
+    handleAction: async ({ action, params, cfg, accountId }) => {
+      if (action !== "edit") {
+        throw new Error(\`ClickClack fixture does not support \${action}\`);
+      }
+      const messageId = typeof params.messageId === "string" ? params.messageId.trim() : "";
+      const text = typeof params.message === "string" ? params.message.trim() : "";
+      if (!messageId || !text) {
+        throw new Error("ClickClack edit requires messageId and message");
+      }
+      const message = await editText(cfg, messageId, text, accountId);
+      const details = { ok: true, messageId: message.id };
+      return { content: [{ type: "text", text: JSON.stringify(details) }], details };
     },
   },
   gateway: {
