@@ -61,6 +61,7 @@ if ! docker_e2e_run_with_harness \
     run_json="$scenario_tmp/run.json"
     flows_json="$scenario_tmp/flows.json"
     flow_json="$scenario_tmp/flow.json"
+    tasks_json="$scenario_tmp/tasks.json"
     mock_pid=""
     clickclack_pid=""
     gateway_pid=""
@@ -88,7 +89,8 @@ if ! docker_e2e_run_with_harness \
           "$jobs_json" \
           "$run_json" \
           "$flows_json" \
-          "$flow_json"
+          "$flow_json" \
+          "$tasks_json"
       fi
     }
     trap cleanup_inner EXIT
@@ -168,8 +170,9 @@ if ! docker_e2e_run_with_harness \
     fi
 
     openclaw tasks flow show "$flow_id" --json >"$flow_json"
+    openclaw tasks list --json >"$tasks_json"
     node scripts/e2e/lib/lobster-loop-taskflow/assertions.mjs verify \
-      "$jobs_json" "$run_json" "$flow_json" "$request_log" "$clickclack_state"
+      "$jobs_json" "$run_json" "$flow_json" "$tasks_json" "$request_log" "$clickclack_state"
   ' >"$RUN_LOG" 2>&1; then
   docker_e2e_print_log "$RUN_LOG"
   exit 1

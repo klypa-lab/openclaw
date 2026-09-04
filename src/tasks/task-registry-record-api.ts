@@ -300,10 +300,7 @@ export function createTaskRecord(params: {
   return cloneTaskRecord(record);
 }
 
-export function updateTaskStateByRunId(params: {
-  runId: string;
-  runtime?: TaskRuntime;
-  sessionKey?: string;
+type TaskStateUpdateParams = {
   childSessionKey?: string | null;
   status?: TaskStatus;
   startedAt?: number;
@@ -318,7 +315,119 @@ export function updateTaskStateByRunId(params: {
   detail?: JsonValue;
   eventSummary?: string | null;
   suppressDelivery?: boolean;
-}) {
+};
+
+function updateTaskState(current: TaskRecord, params: TaskStateUpdateParams): TaskRecord | null {
+  if (!hasAuthoritativeTaskBacking(current)) {
+    return null;
+  }
+  const patch: Partial<TaskRecord> = {};
+  const nextStatus = params.status ? normalizeTaskStatus(params.status) : current.status;
+  if (
+    params.status &&
+    !shouldApplyRunScopedStatusUpdate({
+      currentStatus: current.status,
+      currentRuntime: current.runtime,
+      currentChildSessionKey: current.childSessionKey,
+      currentError: current.error,
+      currentEndedAt: current.endedAt,
+      nextStatus,
+      nextError: params.error,
+      nextEndedAt: params.endedAt,
+    })
+  ) {
+    return null;
+  }
+  const eventAt = params.lastEventAt ?? params.endedAt ?? Date.now();
+  if (params.status) {
+    patch.status = normalizeTaskStatus(params.status);
+  }
+  if (params.startedAt != null) {
+    patch.startedAt = params.startedAt;
+  }
+  if (params.endedAt != null) {
+    patch.endedAt = params.endedAt;
+  }
+  if (params.lastEventAt != null) {
+    patch.lastEventAt = params.lastEventAt;
+  }
+  if (params.childSessionKey !== undefined) {
+    patch.childSessionKey = params.childSessionKey?.trim() || undefined;
+  }
+  if (params.clearError) {
+    patch.error = undefined;
+  } else if (
+    current.status === "cancelled" &&
+    nextStatus !== "cancelled" &&
+    params.error === undefined
+  ) {
+    patch.error = undefined;
+  } else if (params.error !== undefined) {
+    patch.error = params.error;
+  }
+  if (params.progressSummary !== undefined) {
+    patch.progressSummary = normalizeTaskSummary(params.progressSummary);
+  }
+  if (params.terminalSummary !== undefined) {
+    patch.terminalSummary = params.preserveTerminalSummary
+      ? (params.terminalSummary ?? undefined)
+      : normalizeTaskSummary(params.terminalSummary);
+  }
+  if (params.terminalOutcome !== undefined) {
+    patch.terminalOutcome = resolveTaskTerminalOutcome({
+      status: nextStatus,
+      terminalOutcome: params.terminalOutcome,
+    });
+  }
+  if (params.detail !== undefined) {
+    patch.detail = params.detail;
+  }
+  if (params.suppressDelivery) {
+    // Teardown suppression must survive redundant lifecycle finalizers that
+    // arrive after queues are cleared, or they can repopulate the stopped session.
+    patch.deliveryStatus = "not_applicable";
+  }
+  const eventSummary =
+    normalizeTaskSummary(params.eventSummary) ??
+    (nextStatus === "failed"
+      ? normalizeTaskSummary(params.error ?? current.error)
+      : nextStatus === "succeeded"
+        ? normalizeTaskSummary(params.terminalSummary ?? current.terminalSummary)
+        : undefined);
+  const shouldAppendEvent =
+    (params.status && params.status !== current.status) ||
+    Boolean(normalizeTaskSummary(params.eventSummary));
+  const nextEvent = shouldAppendEvent
+    ? appendTaskEvent({
+        at: eventAt,
+        kind:
+          params.status && normalizeTaskStatus(params.status) !== current.status
+            ? normalizeTaskStatus(params.status)
+            : "progress",
+        summary: eventSummary,
+      })
+    : undefined;
+  const task = updateTask(current.taskId, patch);
+  if (task && !params.suppressDelivery) {
+    void maybeDeliverTaskStateChangeUpdate(task.taskId, nextEvent);
+    void maybeDeliverTaskTerminalUpdate(task.taskId);
+  }
+  return task;
+}
+
+export function updateTaskStateById(params: TaskStateUpdateParams & { taskId: string }) {
+  ensureTaskRegistryReady();
+  const current = tasks.get(params.taskId);
+  return current ? updateTaskState(current, params) : null;
+}
+
+export function updateTaskStateByRunId(
+  params: TaskStateUpdateParams & {
+    runId: string;
+    runtime?: TaskRuntime;
+    sessionKey?: string;
+  },
+) {
   ensureTaskRegistryReady();
   const matches = getTasksByRunScope(params);
   if (matches.length === 0) {
@@ -326,102 +435,9 @@ export function updateTaskStateByRunId(params: {
   }
   const updated: TaskRecord[] = [];
   for (const current of matches) {
-    if (!hasAuthoritativeTaskBacking(current)) {
-      continue;
-    }
-    const patch: Partial<TaskRecord> = {};
-    const nextStatus = params.status ? normalizeTaskStatus(params.status) : current.status;
-    if (
-      params.status &&
-      !shouldApplyRunScopedStatusUpdate({
-        currentStatus: current.status,
-        currentRuntime: current.runtime,
-        currentChildSessionKey: current.childSessionKey,
-        currentError: current.error,
-        currentEndedAt: current.endedAt,
-        nextStatus,
-        nextError: params.error,
-        nextEndedAt: params.endedAt,
-      })
-    ) {
-      continue;
-    }
-    const eventAt = params.lastEventAt ?? params.endedAt ?? Date.now();
-    if (params.status) {
-      patch.status = normalizeTaskStatus(params.status);
-    }
-    if (params.startedAt != null) {
-      patch.startedAt = params.startedAt;
-    }
-    if (params.endedAt != null) {
-      patch.endedAt = params.endedAt;
-    }
-    if (params.lastEventAt != null) {
-      patch.lastEventAt = params.lastEventAt;
-    }
-    if (params.childSessionKey !== undefined) {
-      patch.childSessionKey = params.childSessionKey?.trim() || undefined;
-    }
-    if (params.clearError) {
-      patch.error = undefined;
-    } else if (
-      current.status === "cancelled" &&
-      nextStatus !== "cancelled" &&
-      params.error === undefined
-    ) {
-      patch.error = undefined;
-    } else if (params.error !== undefined) {
-      patch.error = params.error;
-    }
-    if (params.progressSummary !== undefined) {
-      patch.progressSummary = normalizeTaskSummary(params.progressSummary);
-    }
-    if (params.terminalSummary !== undefined) {
-      patch.terminalSummary = params.preserveTerminalSummary
-        ? (params.terminalSummary ?? undefined)
-        : normalizeTaskSummary(params.terminalSummary);
-    }
-    if (params.terminalOutcome !== undefined) {
-      patch.terminalOutcome = resolveTaskTerminalOutcome({
-        status: nextStatus,
-        terminalOutcome: params.terminalOutcome,
-      });
-    }
-    if (params.detail !== undefined) {
-      patch.detail = params.detail;
-    }
-    if (params.suppressDelivery) {
-      // Teardown suppression must survive redundant lifecycle finalizers that
-      // arrive after queues are cleared, or they can repopulate the stopped session.
-      patch.deliveryStatus = "not_applicable";
-    }
-    const eventSummary =
-      normalizeTaskSummary(params.eventSummary) ??
-      (nextStatus === "failed"
-        ? normalizeTaskSummary(params.error ?? current.error)
-        : nextStatus === "succeeded"
-          ? normalizeTaskSummary(params.terminalSummary ?? current.terminalSummary)
-          : undefined);
-    const shouldAppendEvent =
-      (params.status && params.status !== current.status) ||
-      Boolean(normalizeTaskSummary(params.eventSummary));
-    const nextEvent = shouldAppendEvent
-      ? appendTaskEvent({
-          at: eventAt,
-          kind:
-            params.status && normalizeTaskStatus(params.status) !== current.status
-              ? normalizeTaskStatus(params.status)
-              : "progress",
-          summary: eventSummary,
-        })
-      : undefined;
-    const task = updateTask(current.taskId, patch);
+    const task = updateTaskState(current, params);
     if (task) {
       updated.push(task);
-      if (!params.suppressDelivery) {
-        void maybeDeliverTaskStateChangeUpdate(task.taskId, nextEvent);
-        void maybeDeliverTaskTerminalUpdate(task.taskId);
-      }
     }
   }
   return updated;

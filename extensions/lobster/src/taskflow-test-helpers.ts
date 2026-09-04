@@ -15,6 +15,7 @@ export function createFakeTaskFlow(overrides?: Partial<BoundTaskFlow>): BoundTas
     ownerKey: "agent:main:main",
     status: "running" as const,
     goal: "Run Lobster workflow",
+    currentStep: "run_lobster",
   };
   const createManaged = vi.fn().mockReturnValue(baseFlow);
   const starts = new Map<string, { request: string; flow: typeof baseFlow }>();
@@ -49,6 +50,27 @@ export function createFakeTaskFlow(overrides?: Partial<BoundTaskFlow>): BoundTas
     starts.set(key, { request, flow });
     return { ok: true, created: true, flow };
   });
+  const runTask = vi.fn().mockImplementation((input) => ({
+    created: true,
+    flow: { ...baseFlow, flowId: input.flowId },
+    task: {
+      taskId: "task-1",
+      runtime: input.runtime,
+      requesterSessionKey: "agent:main:main",
+      ownerKey: "agent:main:main",
+      scopeKind: "session",
+      parentFlowId: input.flowId,
+      label: input.label,
+      task: input.task,
+      status: input.status ?? "queued",
+      deliveryStatus: input.deliveryStatus ?? "pending",
+      notifyPolicy: input.notifyPolicy ?? "done_only",
+      createdAt: 1,
+      startedAt: input.startedAt,
+      lastEventAt: input.lastEventAt ?? 1,
+      progressSummary: input.progressSummary,
+    },
+  }));
 
   return {
     sessionKey: "agent:main:main",
@@ -62,7 +84,12 @@ export function createFakeTaskFlow(overrides?: Partial<BoundTaskFlow>): BoundTas
     getTaskSummary: vi.fn(),
     updateProgress: vi.fn().mockImplementation((input) => ({
       applied: true,
-      flow: { ...baseFlow, revision: input.expectedRevision + 1 },
+      flow: {
+        ...baseFlow,
+        revision: input.expectedRevision + 1,
+        currentStep: input.currentStep ?? baseFlow.currentStep,
+        stateJson: input.stateJson,
+      },
     })),
     setWaiting: vi.fn().mockImplementation((input) => ({
       applied: true,
@@ -89,7 +116,28 @@ export function createFakeTaskFlow(overrides?: Partial<BoundTaskFlow>): BoundTas
       },
     })),
     cancel: vi.fn(),
-    runTask: vi.fn(),
+    runTask,
+    recordTaskProgress: vi.fn().mockImplementation((input) => ({
+      applied: true,
+      task: {
+        ...runTask.mock.results.at(-1)?.value.task,
+        taskId: input.taskId,
+        progressSummary: input.progressSummary,
+        lastEventAt: input.lastEventAt ?? 2,
+      },
+    })),
+    finalizeTask: vi.fn().mockImplementation((input) => ({
+      applied: true,
+      task: {
+        ...runTask.mock.results.at(-1)?.value.task,
+        taskId: input.taskId,
+        status: input.status,
+        error: input.error,
+        terminalSummary: input.terminalSummary,
+        terminalOutcome: input.terminalOutcome,
+        endedAt: input.endedAt ?? 3,
+      },
+    })),
     ...overrides,
   };
 }

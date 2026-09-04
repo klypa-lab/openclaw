@@ -19,22 +19,23 @@ import {
 import {
   type BoundTaskFlow,
   type JsonLike,
-  type ManagedLobsterFlowUpdate,
   type ManagedLobsterFlowResult,
   launchManagedLobsterFlow,
   resumeManagedLobsterFlow,
 } from "./lobster-taskflow.js";
-import type { ManagedStatusMessageReceipt } from "./status-message.js";
 
 type LobsterToolOptions = {
   runner?: LobsterRunner;
   taskFlow?: BoundTaskFlow;
   getInvocationContext?: OpenClawPluginToolContext["getInvocationContext"];
-  createStatusMessage?: (
-    flow: NonNullable<ReturnType<BoundTaskFlow["get"]>>,
-  ) => Promise<ManagedStatusMessageReceipt | undefined>;
-  onFlowUpdate?: ManagedLobsterFlowUpdate;
 };
+
+function buildFlowInspection(flowId: string) {
+  return {
+    chatCommand: "/tasks",
+    cliCommand: `openclaw tasks flow show ${flowId}`,
+  };
+}
 
 function readOptionalTrimmedString(value: unknown, fieldName: string): string | undefined {
   if (value === undefined) {
@@ -197,11 +198,16 @@ function resolveManagedFlowToolResult(result: ManagedLobsterFlowResult) {
     throw result.error;
   }
   if ("replayed" in result) {
-    return jsonResult({ outcome: "already_started", flow: result.flow });
+    return jsonResult({
+      outcome: "already_started",
+      flow: result.flow,
+      inspect: buildFlowInspection(result.flow.flowId),
+    });
   }
   return jsonResult({
     ...result.envelope,
     flow: result.flow,
+    inspect: buildFlowInspection(result.flow.flowId),
   });
 }
 
@@ -299,10 +305,7 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
           controllerId: flowParams.controllerId,
           goal: flowParams.goal,
           invocation,
-          ...(options?.createStatusMessage
-            ? { createStatusMessage: options.createStatusMessage }
-            : {}),
-          ...(options?.onFlowUpdate ? { onFlowUpdate: options.onFlowUpdate } : {}),
+          trackTask: true,
           ...(flowParams.stateJson !== undefined ? { stateJson: flowParams.stateJson } : {}),
           ...(flowParams.currentStep ? { currentStep: flowParams.currentStep } : {}),
           ...(flowParams.waitingStep ? { waitingStep: flowParams.waitingStep } : {}),
@@ -320,6 +323,7 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
         return jsonResult({
           outcome: launched.created ? "started" : "already_started",
           flow: launched.flow,
+          inspect: buildFlowInspection(launched.flow.flowId),
         });
       }
       if (flowParams?.action === "resume") {
@@ -331,7 +335,6 @@ export function createLobsterTool(api: OpenClawPluginApi, options?: LobsterToolO
             runnerParams: flowParams.runnerParams,
             flowId: flowParams.flowId,
             expectedRevision: flowParams.expectedRevision,
-            ...(options?.onFlowUpdate ? { onFlowUpdate: options.onFlowUpdate } : {}),
             ...(flowParams.currentStep ? { currentStep: flowParams.currentStep } : {}),
             ...(flowParams.waitingStep ? { waitingStep: flowParams.waitingStep } : {}),
           }),

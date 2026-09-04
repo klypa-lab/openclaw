@@ -68,6 +68,14 @@ type BoundTaskFlowTaskRunResult =
       flow?: TaskFlowRecord;
     };
 
+type BoundTaskFlowTaskMutationResult =
+  | { applied: true; task: TaskRecord }
+  | {
+      applied: false;
+      code: "not_found" | "terminal" | "persist_failed";
+      current?: TaskRecord;
+    };
+
 type BoundTaskFlowCancelResult = {
   found: boolean;
   cancelled: boolean;
@@ -163,6 +171,22 @@ export type BoundTaskFlowRuntime = {
     lastEventAt?: number;
     progressSummary?: string | null;
   }) => BoundTaskFlowTaskRunResult;
+  recordTaskProgress: (params: {
+    flowId: string;
+    taskId: string;
+    progressSummary?: string | null;
+    eventSummary?: string | null;
+    lastEventAt?: number;
+  }) => BoundTaskFlowTaskMutationResult;
+  finalizeTask: (params: {
+    flowId: string;
+    taskId: string;
+    status: Extract<TaskRecord["status"], "succeeded" | "failed" | "timed_out" | "cancelled">;
+    error?: string;
+    terminalSummary?: string | null;
+    terminalOutcome?: TaskRecord["terminalOutcome"] | null;
+    endedAt?: number;
+  }) => BoundTaskFlowTaskMutationResult;
 };
 
 export type PluginRuntimeTaskFlow = {

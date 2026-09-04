@@ -4,10 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import plugin from "./index.js";
 import type { OpenClawPluginApi } from "./runtime-api.js";
 
-async function triggerGatewayStart(
-  managedFlows: ReturnType<typeof createRuntimeTaskFlow>,
-  messageAction = vi.fn().mockResolvedValue({ messageId: "message-1" }),
-) {
+async function triggerGatewayStart(managedFlows: ReturnType<typeof createRuntimeTaskFlow>) {
   const on = vi.fn();
   const api = createTestPluginApi({
     id: "lobster",
@@ -17,7 +14,6 @@ async function triggerGatewayStart(
       tasks: {
         managedFlows,
       },
-      channel: { outbound: { messageAction } },
     } as unknown as OpenClawPluginApi["runtime"],
   });
 
@@ -27,7 +23,6 @@ async function triggerGatewayStart(
     throw new Error("Lobster did not register Gateway restart recovery");
   }
   await hook({ port: 18789 }, {});
-  return { messageAction };
 }
 
 describe("lobster plugin startup", () => {
@@ -54,7 +49,8 @@ describe("lobster plugin startup", () => {
       revision: started.flow.revision + 1,
       runnerOwnerId: "lobster",
       runnerLeaseId: "lease-before-restart",
-      blockedSummary: "The Gateway runner stopped before the workflow completed.",
+      blockedSummary:
+        "The Gateway runner stopped before the workflow completed. Start the workflow again.",
     });
   });
 
@@ -91,7 +87,7 @@ describe("lobster plugin startup", () => {
     });
   });
 
-  it("updates the existing status message when restart recovery settles a flow", async () => {
+  it("finalizes the linked task when restart recovery settles a flow", async () => {
     const managedFlows = createRuntimeTaskFlow();
     const taskFlow = managedFlows.bindSession({
       sessionKey: "agent:main:lobster-status-recovery",
@@ -102,51 +98,47 @@ describe("lobster plugin startup", () => {
         threadId: "42",
       },
     });
-    const created = taskFlow.createManaged({
+    const started = taskFlow.startManaged({
       controllerId: "lobster/run",
       goal: "Run Lobster workflow",
+      runId: "run-before-restart",
+      toolCallId: "call-before-restart",
+      runnerLease: { ownerId: "lobster", leaseId: "lease-before-restart" },
     });
+    if (!started.ok) {
+      throw new Error("Failed to seed a stale Lobster flow");
+    }
+    const task = taskFlow.runTask({
+      flowId: started.flow.flowId,
+      runtime: "cli",
+      task: "Run Lobster workflow",
+      status: "running",
+      notifyPolicy: "done_only",
+    });
+    if (!task.created) {
+      throw new Error("Failed to seed a linked Lobster task");
+    }
     const bound = taskFlow.updateProgress({
-      flowId: created.flowId,
-      expectedRevision: created.revision,
+      flowId: started.flow.flowId,
+      expectedRevision: started.flow.revision,
       stateJson: {
-        statusMessage: {
-          ownerFlowId: created.flowId,
-          messageId: "status-1",
+        lobsterTask: {
+          schemaVersion: 1,
+          ownerFlowId: started.flow.flowId,
+          taskId: task.task.taskId,
         },
       },
     });
     if (!bound.applied) {
-      throw new Error("Failed to seed a Lobster status message binding");
+      throw new Error("Failed to seed a Lobster task binding");
     }
-    const started = taskFlow.resume({
-      flowId: created.flowId,
-      expectedRevision: bound.flow.revision,
-      status: "running",
-      runnerLease: { ownerId: "lobster", leaseId: "lease-before-restart" },
+
+    await triggerGatewayStart(managedFlows);
+
+    expect(taskFlow.get(started.flow.flowId)).toMatchObject({ status: "failed" });
+    expect(taskFlow.getTaskSummary(started.flow.flowId)).toMatchObject({
+      active: 0,
+      failures: 1,
     });
-    if (!started.applied) {
-      throw new Error("Failed to seed a stale Lobster flow");
-    }
-
-    const messageAction = vi.fn().mockResolvedValue({ messageId: "status-1" });
-    await triggerGatewayStart(managedFlows, messageAction);
-
-    expect(messageAction).toHaveBeenCalledOnce();
-    expect(messageAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: "edit",
-        accountId: "operations",
-        sessionKey: "agent:main:lobster-status-recovery",
-        params: expect.objectContaining({
-          channel: "telegram",
-          to: "123456",
-          threadId: "42",
-          messageId: "status-1",
-          message: expect.stringContaining("Status: Failed"),
-        }),
-      }),
-      { timeoutMs: 90_000 },
-    );
   });
 });

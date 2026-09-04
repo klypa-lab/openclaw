@@ -106,6 +106,8 @@ function createTaskFlowSessionMock(): BoundTaskFlowRuntime {
     requestCancel: vi.fn<BoundTaskFlowRuntime["requestCancel"]>(),
     cancel: vi.fn<BoundTaskFlowRuntime["cancel"]>(),
     runTask: vi.fn<BoundTaskFlowRuntime["runTask"]>(),
+    recordTaskProgress: vi.fn<BoundTaskFlowRuntime["recordTaskProgress"]>(),
+    finalizeTask: vi.fn<BoundTaskFlowRuntime["finalizeTask"]>(),
   };
 }
 

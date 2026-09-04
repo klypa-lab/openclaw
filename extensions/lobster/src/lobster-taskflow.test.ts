@@ -146,53 +146,150 @@ describe("runManagedLobsterFlow", () => {
     });
   });
 
-  it("binds one status receipt before starting the runner and publishes terminal state", async () => {
+  it("binds one native task before starting the runner and finalizes it", async () => {
     const taskFlow = createFakeTaskFlow();
-    const createStatusMessage = vi.fn().mockResolvedValue({ messageId: "message-1" });
-    const onFlowUpdate = vi.fn().mockResolvedValue(undefined);
     const runner = createRunner({
       ok: true,
       status: "ok",
-      output: [],
+      output: [{ result: "ready" }],
       requiresApproval: null,
     });
 
     const launched = launchManagedLobsterFlow({
       ...createRunFlowParams(taskFlow, runner),
-      createStatusMessage,
-      onFlowUpdate,
+      trackTask: true,
     });
     if (!launched.ok || !launched.created) {
       throw new Error("Expected a new managed flow");
     }
     await launched.completion;
 
-    expect(createStatusMessage).toHaveBeenCalledOnce();
+    expect(taskFlow.runTask).toHaveBeenCalledWith({
+      flowId: launched.flow.flowId,
+      runtime: "cli",
+      label: "Run Lobster workflow",
+      task: "Run Lobster workflow",
+      status: "running",
+      notifyPolicy: "done_only",
+      progressSummary: "run_lobster",
+    });
     expect(taskFlow.updateProgress).toHaveBeenCalledWith({
       flowId: launched.flow.flowId,
-      expectedRevision: launched.flow.revision,
+      expectedRevision: 0,
       currentStep: launched.flow.currentStep,
       stateJson: {
-        statusMessage: {
-          messageId: "message-1",
+        lobsterTask: {
+          schemaVersion: 1,
           ownerFlowId: launched.flow.flowId,
+          taskId: "task-1",
         },
       },
     });
     expect(runner.run).toHaveBeenCalledOnce();
-    expect(onFlowUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ status: "succeeded" }));
+    expect(taskFlow.finalizeTask).toHaveBeenCalledWith({
+      flowId: launched.flow.flowId,
+      taskId: "task-1",
+      status: "succeeded",
+      terminalSummary: 'Result: [{"result":"ready"}]',
+    });
   });
 
-  it("does not create a second status message for a replayed managed start", async () => {
+  it("keeps the native task active through approval and finalizes it after resume", async () => {
+    const taskBinding = {
+      lobsterTask: {
+        schemaVersion: 1 as const,
+        ownerFlowId: "flow-1",
+        taskId: "task-1",
+      },
+    };
+    const taskFlow = createFakeTaskFlow({
+      setWaiting: vi.fn().mockImplementation((input) => ({
+        applied: true,
+        flow: {
+          flowId: "flow-1",
+          revision: input.expectedRevision + 1,
+          syncMode: "managed" as const,
+          controllerId: "tests/lobster",
+          ownerKey: "agent:main:main",
+          status: "waiting" as const,
+          goal: "Run Lobster workflow",
+          stateJson: taskBinding,
+        },
+      })),
+      resume: vi.fn().mockImplementation((input) => ({
+        applied: true,
+        flow: {
+          flowId: "flow-1",
+          revision: input.expectedRevision + 1,
+          syncMode: "managed" as const,
+          controllerId: "tests/lobster",
+          ownerKey: "agent:main:main",
+          status: "running" as const,
+          goal: "Run Lobster workflow",
+          stateJson: taskBinding,
+        },
+      })),
+    });
+    const approvalRunner = createRunner({
+      ok: true,
+      status: "needs_approval",
+      output: [],
+      requiresApproval: {
+        type: "approval_request",
+        prompt: "Send the report?",
+        items: [],
+        resumeToken: "resume-1",
+      },
+    });
+
+    const launched = launchManagedLobsterFlow({
+      ...createRunFlowParams(taskFlow, approvalRunner),
+      trackTask: true,
+    });
+    if (!launched.ok || !launched.created) {
+      throw new Error("Expected a new managed flow");
+    }
+    const waiting = await launched.completion;
+
+    expect(waiting).toMatchObject({ ok: true, flow: { status: "waiting", revision: 2 } });
+    expect(taskFlow.recordTaskProgress).toHaveBeenCalledWith({
+      flowId: "flow-1",
+      taskId: "task-1",
+      progressSummary: "Approval required: Send the report?",
+      eventSummary: "Approval required",
+    });
+    expect(taskFlow.finalizeTask).not.toHaveBeenCalled();
+
+    const resumeRunner = createRunner({
+      ok: true,
+      status: "ok",
+      output: [{ sent: true }],
+      requiresApproval: null,
+    });
+    const resumed = await resumeManagedLobsterFlow({
+      ...createResumeFlowParams(taskFlow, resumeRunner),
+      expectedRevision: 2,
+    });
+
+    expect(resumed).toMatchObject({ ok: true, flow: { status: "succeeded" } });
+    expect(taskFlow.runTask).toHaveBeenCalledOnce();
+    expect(taskFlow.finalizeTask).toHaveBeenCalledWith({
+      flowId: "flow-1",
+      taskId: "task-1",
+      status: "succeeded",
+      terminalSummary: 'Result: [{"sent":true}]',
+    });
+  });
+
+  it("does not create a second native task for a replayed managed start", async () => {
     const taskFlow = createFakeTaskFlow();
-    const createStatusMessage = vi.fn().mockResolvedValue({ messageId: "message-1" });
     const runner = createRunner({
       ok: true,
       status: "ok",
       output: [],
       requiresApproval: null,
     });
-    const params = { ...createRunFlowParams(taskFlow, runner), createStatusMessage };
+    const params = { ...createRunFlowParams(taskFlow, runner), trackTask: true };
 
     const first = launchManagedLobsterFlow(params);
     const replay = launchManagedLobsterFlow(params);
@@ -202,7 +299,7 @@ describe("runManagedLobsterFlow", () => {
     await first.completion;
 
     expect(replay.created).toBe(false);
-    expect(createStatusMessage).toHaveBeenCalledOnce();
+    expect(taskFlow.runTask).toHaveBeenCalledOnce();
   });
 
   it("finishes from the latest revision after Lobster reports progress", async () => {
@@ -436,7 +533,6 @@ describe("runManagedLobsterFlow", () => {
 
   it("fails the flow when Lobster returns an error envelope", async () => {
     const taskFlow = createFakeTaskFlow();
-    const onFlowUpdate = vi.fn().mockResolvedValue(undefined);
     const runner = createRunner({
       ok: false,
       error: {
@@ -446,14 +542,13 @@ describe("runManagedLobsterFlow", () => {
     });
 
     const result = expectManagedFlowFailure(
-      await runManagedLobsterFlow({ ...createRunFlowParams(taskFlow, runner), onFlowUpdate }),
+      await runManagedLobsterFlow(createRunFlowParams(taskFlow, runner)),
     );
     expect(result.error.message).toBe("boom");
     expect(taskFlow.fail).toHaveBeenCalledWith({
       flowId: "flow-1",
       expectedRevision: 0,
     });
-    expect(onFlowUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }));
   });
 
   it("fails the flow when the runner throws", async () => {

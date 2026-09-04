@@ -456,7 +456,7 @@ describe("lobster plugin tool", () => {
     });
     expect(taskFlow.setWaiting).toHaveBeenCalledWith({
       flowId: "flow-1",
-      expectedRevision: 0,
+      expectedRevision: 1,
       currentStep: "await_review",
       waitJson: {
         kind: "lobster_approval",
@@ -471,6 +471,10 @@ describe("lobster plugin tool", () => {
     const flow = requireRecord(details.flow, "managed run flow details");
     expect(flow.flowId).toBe("flow-1");
     expect(flow.status).toBe("running");
+    expect(details.inspect).toEqual({
+      chatCommand: "/tasks",
+      cliCommand: "openclaw tasks flow show flow-1",
+    });
     expect(details.mutation).toBeUndefined();
   });
 
@@ -499,6 +503,10 @@ describe("lobster plugin tool", () => {
     const replayDetails = requireRecord(replay.details, "replayed managed start");
     expect(replayDetails.outcome).toBe("already_started");
     expect(requireRecord(replayDetails.flow, "replayed flow").flowId).toBe("flow-1");
+    expect(replayDetails.inspect).toEqual({
+      chatCommand: "/tasks",
+      cliCommand: "openclaw tasks flow show flow-1",
+    });
     expect(runner.run).toHaveBeenCalledOnce();
   });
 

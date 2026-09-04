@@ -45,6 +45,7 @@ export {
   isParentFlowLinkError,
   setTaskCleanupAfterById,
   setTaskRunDeliveryStatusByRunId,
+  updateTaskStateById,
   updateTaskNotifyPolicyById,
 } from "./task-registry.js";
 export type { TaskRecord } from "./task-registry.types.js";

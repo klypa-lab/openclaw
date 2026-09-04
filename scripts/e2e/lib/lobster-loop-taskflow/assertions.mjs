@@ -87,31 +87,50 @@ function assertFlow(filePath) {
     throw new Error(`TaskFlow automation trace state mismatch: ${JSON.stringify(flow.stateJson)}`);
   }
   if (
-    flow.stateJson?.statusMessage?.ownerFlowId !== flow.flowId ||
-    typeof flow.stateJson?.statusMessage?.messageId !== "string"
+    flow.stateJson?.lobsterTask?.ownerFlowId !== flow.flowId ||
+    typeof flow.stateJson?.lobsterTask?.taskId !== "string"
   ) {
-    throw new Error(`TaskFlow status message binding mismatch: ${JSON.stringify(flow.stateJson)}`);
+    throw new Error(`TaskFlow task binding mismatch: ${JSON.stringify(flow.stateJson)}`);
   }
   return flow;
 }
 
-function assertStatusMessage(filePath, flow) {
-  const state = readJson(filePath);
-  const statusMessages = (state.outboundMessages ?? []).filter(
-    (message) => typeof message?.body === "string" && message.body.startsWith("Lobster: "),
+function assertNativeTask(filePath, flow) {
+  const tasks = arrayFrom(readJson(filePath), "tasks");
+  const matches = tasks.filter((task) => task?.parentFlowId === flow.flowId);
+  if (matches.length !== 1) {
+    throw new Error(`expected one native task for the Lobster flow, found ${matches.length}`);
+  }
+  const task = matches[0];
+  if (task.taskId !== flow.stateJson.lobsterTask.taskId) {
+    throw new Error("native task does not match the persisted TaskFlow binding");
+  }
+  if (task.status !== "succeeded" || typeof task.endedAt !== "number") {
+    throw new Error(`native task is not terminal: ${JSON.stringify(task)}`);
+  }
+  if (task.progressSummary !== "commands_list") {
+    throw new Error(`native task did not retain Lobster progress: ${JSON.stringify(task)}`);
+  }
+  if (
+    typeof task.terminalSummary !== "string" ||
+    !task.terminalSummary.startsWith("Result: [") ||
+    !task.terminalSummary.includes('"name":"approve"')
+  ) {
+    throw new Error(`native task did not retain the Lobster result: ${JSON.stringify(task)}`);
+  }
+}
+
+function assertTerminalDelivery(filePath) {
+  const messages = arrayFrom(readJson(filePath), "outboundMessages");
+  const terminal = messages.filter(
+    (message) =>
+      typeof message?.body === "string" && message.body.startsWith("Background task done:"),
   );
-  if (statusMessages.length !== 1) {
-    throw new Error(`expected one Lobster status message, found ${statusMessages.length}`);
+  if (terminal.length !== 1) {
+    throw new Error(`expected one native terminal delivery, found ${terminal.length}`);
   }
-  const statusMessage = statusMessages[0];
-  if (statusMessage.id !== flow.stateJson.statusMessage.messageId) {
-    throw new Error("Lobster status message does not match the persisted TaskFlow binding");
-  }
-  if (!statusMessage.edited_at || !statusMessage.body.includes("Status: Completed")) {
-    throw new Error(`Lobster status message was not updated to completion: ${statusMessage.body}`);
-  }
-  if (!statusMessage.body.includes("Step: commands_list")) {
-    throw new Error(`Lobster status message lost the final step: ${statusMessage.body}`);
+  if (!terminal[0].body.includes("Result: [")) {
+    throw new Error(`native terminal delivery omitted the Lobster result: ${terminal[0].body}`);
   }
 }
 
@@ -153,13 +172,14 @@ if (command === "job-id") {
   }
   process.stdout.write(`${flow.flowId}\n`);
 } else if (command === "verify") {
-  const [jobsPath, runPath, flowPath, requestLogPath, clickClackStatePath] = args;
+  const [jobsPath, runPath, flowPath, tasksPath, requestLogPath, channelStatePath] = args;
   findLoopJob(jobsPath);
   assertRunSucceeded(runPath);
   const flow = assertFlow(flowPath);
+  assertNativeTask(tasksPath, flow);
   assertProviderTrace(requestLogPath);
-  assertStatusMessage(clickClackStatePath, flow);
-  console.log("Packaged /loop -> Automation -> Lobster -> TaskFlow proof passed.");
+  assertTerminalDelivery(channelStatePath);
+  console.log("Packaged /loop -> Automation -> Lobster -> native TaskFlow proof passed.");
 } else {
   throw new Error("usage: assertions.mjs <job-id|flow-id-if-terminal|verify> <artifact paths...>");
 }

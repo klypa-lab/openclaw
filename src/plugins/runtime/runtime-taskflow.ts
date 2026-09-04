@@ -1,5 +1,7 @@
 // Runtime task-flow helpers adapt plugin task descriptors into executable task flows.
 import { isDeepStrictEqual } from "node:util";
+import { getTaskById, updateTaskStateById } from "../../tasks/runtime-internal.js";
+import { isTerminalTaskStatus } from "../../tasks/task-executor-policy.js";
 import {
   cancelFlowByIdForOwner,
   getFlowTaskSummary,
@@ -28,7 +30,7 @@ import {
   setFlowWaiting,
   updateFlowProgress,
 } from "../../tasks/task-flow-runtime-internal.js";
-import type { TaskDeliveryState } from "../../tasks/task-registry.types.js";
+import type { TaskDeliveryState, TaskRecord } from "../../tasks/task-registry.types.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
 import type {
   BoundTaskFlowRuntime,
@@ -129,6 +131,26 @@ function matchesTerminalReplay(params: {
     (params.updatedAt === undefined || flow.updatedAt === params.updatedAt) &&
     (params.endedAt === undefined || flow.endedAt === params.endedAt)
   );
+}
+
+function resolveManagedFlowTask(params: {
+  ownerKey: string;
+  flowId: string;
+  taskId: string;
+}): TaskRecord | undefined {
+  const flow = getTaskFlowByIdForOwner({
+    flowId: params.flowId,
+    callerOwnerKey: params.ownerKey,
+  });
+  if (!flow || flow.syncMode !== "managed") {
+    return undefined;
+  }
+  const task = getTaskById(params.taskId);
+  return task?.scopeKind === "session" &&
+    task.ownerKey.trim() === params.ownerKey &&
+    task.parentFlowId?.trim() === flow.flowId
+    ? task
+    : undefined;
 }
 
 function createBoundTaskFlowRuntime(params: {
@@ -382,6 +404,56 @@ function createBoundTaskFlowRuntime(params: {
         flow: managed,
         task: created.task,
       };
+    },
+    recordTaskProgress: (input) => {
+      const task = resolveManagedFlowTask({
+        ownerKey,
+        flowId: input.flowId,
+        taskId: input.taskId,
+      });
+      if (!task) {
+        return { applied: false, code: "not_found" };
+      }
+      if (isTerminalTaskStatus(task.status)) {
+        return { applied: false, code: "terminal", current: task };
+      }
+      const updated = updateTaskStateById({
+        taskId: task.taskId,
+        progressSummary: input.progressSummary,
+        eventSummary: input.eventSummary,
+        lastEventAt: input.lastEventAt ?? Date.now(),
+      });
+      return updated
+        ? { applied: true, task: updated }
+        : { applied: false, code: "persist_failed", current: task };
+    },
+    finalizeTask: (input) => {
+      const task = resolveManagedFlowTask({
+        ownerKey,
+        flowId: input.flowId,
+        taskId: input.taskId,
+      });
+      if (!task) {
+        return { applied: false, code: "not_found" };
+      }
+      if (isTerminalTaskStatus(task.status)) {
+        return task.status === input.status
+          ? { applied: true, task }
+          : { applied: false, code: "terminal", current: task };
+      }
+      const endedAt = input.endedAt ?? Date.now();
+      const updated = updateTaskStateById({
+        taskId: task.taskId,
+        status: input.status,
+        endedAt,
+        lastEventAt: endedAt,
+        error: input.error,
+        terminalSummary: input.terminalSummary,
+        terminalOutcome: input.terminalOutcome,
+      });
+      return updated
+        ? { applied: true, task: updated }
+        : { applied: false, code: "persist_failed", current: task };
     },
   };
 }

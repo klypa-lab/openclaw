@@ -1,11 +1,12 @@
 // Runtime task-flow tests cover plugin task-flow registration and execution behavior.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAcpTaskBackingDetailForTest } from "../../tasks/task-backing-authority.test-support.js";
 import { createRunningTaskRunCore } from "../../tasks/task-executor.js";
 import { createTaskFlowForTask, getTaskFlowById } from "../../tasks/task-flow-registry.js";
 import { getTaskById } from "../../tasks/task-registry.js";
 import { getInspectableActiveTaskRestartBlockers } from "../../tasks/task-registry.maintenance.js";
 import {
+  getRuntimeTaskMocks,
   installRuntimeTaskDeliveryMock,
   resetRuntimeTaskTestState,
 } from "./runtime-task-test-harness.js";
@@ -240,6 +241,106 @@ describe("runtime TaskFlow", () => {
     }
     expect(summary.total).toBe(1);
     expect(summary.active).toBe(1);
+  });
+
+  it("updates, delivers, and finalizes only tasks owned by the bound managed flow", async () => {
+    const { sendMessageMock } = getRuntimeTaskMocks();
+    sendMessageMock.mockResolvedValue({
+      channel: "telegram",
+      to: "telegram:123",
+      via: "direct",
+    });
+    const runtime = createRuntimeTaskFlow();
+    const taskFlow = runtime.bindSession({
+      sessionKey: "agent:main:main",
+      requesterOrigin: { channel: "telegram", to: "telegram:123" },
+    });
+    const otherTaskFlow = runtime.bindSession({ sessionKey: "agent:main:other" });
+    const flow = requireCreatedFlow(
+      taskFlow.createManaged({
+        controllerId: "tests/runtime-taskflow/task-lifecycle",
+        goal: "Run managed work",
+      }),
+    );
+    const created = taskFlow.runTask({
+      flowId: flow.flowId,
+      runtime: "cli",
+      task: "Managed controller run",
+      label: "Managed work",
+      status: "running",
+      notifyPolicy: "done_only",
+      progressSummary: "Starting",
+    });
+    if (!created.created) {
+      throw new Error("expected managed task creation to succeed");
+    }
+
+    expect(
+      otherTaskFlow.recordTaskProgress({
+        flowId: flow.flowId,
+        taskId: created.task.taskId,
+        progressSummary: "Forged progress",
+      }),
+    ).toEqual({ applied: false, code: "not_found" });
+
+    expect(
+      taskFlow.recordTaskProgress({
+        flowId: flow.flowId,
+        taskId: created.task.taskId,
+        progressSummary: "Verifying",
+        eventSummary: "Verification started",
+        lastEventAt: 20,
+      }),
+    ).toMatchObject({
+      applied: true,
+      task: { status: "running", progressSummary: "Verifying", lastEventAt: 20 },
+    });
+
+    const finalized = taskFlow.finalizeTask({
+      flowId: flow.flowId,
+      taskId: created.task.taskId,
+      status: "succeeded",
+      terminalSummary: "Managed work completed.",
+      endedAt: 30,
+    });
+    expect(finalized).toMatchObject({
+      applied: true,
+      task: {
+        status: "succeeded",
+        terminalSummary: "Managed work completed.",
+        endedAt: 30,
+      },
+    });
+    await vi.waitFor(() => expect(sendMessageMock).toHaveBeenCalledOnce());
+    expect(sendMessageMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        to: "telegram:123",
+        content: expect.stringContaining("Background task done: Managed work"),
+      }),
+    );
+    expect(
+      taskFlow.finalizeTask({
+        flowId: flow.flowId,
+        taskId: created.task.taskId,
+        status: "succeeded",
+      }),
+    ).toMatchObject({
+      applied: true,
+      task: {
+        taskId: created.task.taskId,
+        status: "succeeded",
+        terminalSummary: "Managed work completed.",
+      },
+    });
+    expect(sendMessageMock).toHaveBeenCalledOnce();
+    expect(
+      taskFlow.recordTaskProgress({
+        flowId: flow.flowId,
+        taskId: created.task.taskId,
+        progressSummary: "Late progress",
+      }),
+    ).toMatchObject({ applied: false, code: "terminal" });
   });
 
   it("keeps terminal state monotonic and replays the same successful completion", () => {

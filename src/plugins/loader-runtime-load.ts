@@ -60,12 +60,6 @@ function createDeferredGatewayNodesRuntime(runtime: PluginRuntime): PluginRuntim
   };
 }
 
-function createDeferredGatewayChannelMessageAction(
-  runtime: PluginRuntime,
-): PluginRuntime["channel"]["outbound"]["messageAction"] {
-  return (...args) => runtime.channel.outbound.messageAction(...args);
-}
-
 export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegistry {
   return loadOpenClawPluginsInternal(options);
 }
@@ -141,9 +135,6 @@ function loadOpenClawPluginsInternal(
     const borrowedNodes = activeGatewayRuntime
       ? createDeferredGatewayNodesRuntime(activeGatewayRuntime)
       : undefined;
-    const borrowedChannelMessageAction = activeGatewayRuntime
-      ? createDeferredGatewayChannelMessageAction(activeGatewayRuntime)
-      : undefined;
     const runtime = overrides?.runtime
       ? // The registry wraps this discovery-only base with scoped lazy capabilities.
         (overrides.runtime as unknown as PluginRuntime)
@@ -154,8 +145,6 @@ function loadOpenClawPluginsInternal(
             ...options.runtimeOptions,
             subagent: options.runtimeOptions?.subagent ?? borrowedSubagent,
             nodes: options.runtimeOptions?.nodes ?? borrowedNodes,
-            dispatchChannelMessageAction:
-              options.runtimeOptions?.dispatchChannelMessageAction ?? borrowedChannelMessageAction,
           },
           loadPluginModule,
         });
